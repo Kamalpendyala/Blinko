@@ -9,6 +9,7 @@ final class NudgePanel: NSPanel {
     private let iconView = NSImageView()
     private let titleLabel = NSTextField(labelWithString: "Blink")
     private let subtitleLabel = NSTextField(labelWithString: "Rest your eyes for a moment")
+    private var showGeneration = 0
 
     init() {
         super.init(
@@ -99,18 +100,21 @@ final class NudgePanel: NSPanel {
     }
 
     func show() {
-        alphaValue = 1
+        showGeneration += 1
         orderFrontRegardless()
+        animator().alphaValue = 1
     }
 
     func hide() {
         guard isVisible else { return }
 
+        let generation = showGeneration
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.25
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
-            self?.orderOut(nil)
+            guard let self, self.showGeneration == generation else { return }
+            self.orderOut(nil)
         }
     }
 }

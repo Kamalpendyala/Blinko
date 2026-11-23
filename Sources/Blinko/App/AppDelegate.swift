@@ -290,22 +290,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.prompt = "Record"
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
+            self.recordURL = url
 
-            do {
-                let recorder = try LandmarkCSVRecorder(url: url)
-                self.recordURL = url
-
-                if let monitor = self.monitor {
+            if let monitor = self.monitor {
+                do {
+                    let recorder = try LandmarkCSVRecorder(url: url)
                     monitor.setRecorder(recorder)
                     self.debugModel?.setRecording(true)
                     self.debugModel?.setStatus("Recording landmarks to \(url.lastPathComponent)…")
-                } else if self.replayPipeline != nil || self.replayURL != nil {
-                    self.startReplayIfNeeded()
-                } else {
-                    self.startMonitoring()
+                } catch {
+                    self.recordURL = nil
+                    self.showError("Could not open \(url.lastPathComponent) for recording.", error)
                 }
-            } catch {
-                self.showError("Could not open \(url.lastPathComponent) for recording.", error)
+            } else if self.replayPipeline != nil || self.replayURL != nil {
+                self.startReplayIfNeeded()
+            } else {
+                self.startMonitoring()
             }
         }
     }
@@ -348,6 +348,8 @@ extension AppDelegate: DetectionPipelineDelegate {
         let baseline = pipeline.detector.baseline.map { String(format: "%.3f", $0) } ?? "n/a"
         log("replay finished: frames=\(frames) blinks=\(blinks) baseline=\(baseline)")
 
+        // The replay source is done; close any recorder it was writing.
+        pipeline.shutdown()
         replayPipeline = nil
 
         if options.exitAfterReplay {

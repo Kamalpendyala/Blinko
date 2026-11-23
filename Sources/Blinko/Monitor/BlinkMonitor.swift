@@ -355,6 +355,9 @@ extension BlinkMonitor: DetectionPipelineDelegate {
     }
 
     func detectionPipeline(_ pipeline: DetectionPipeline, didFail error: FrameSourceError) {
+        // Ignore late errors from a pipeline that has already been stopped.
+        guard isRunning else { return }
+
         onError?(error)
 
         switch error {

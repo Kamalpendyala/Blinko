@@ -173,10 +173,14 @@ Manual Phase B check:
 2. Click **Preview Nudge** in the debug window. The overlay should appear near
    the top-right without taking focus and disappear in under 3 s.
 3. Keep your eyes open without blinking for about 40 s. The debug row should
-   show the low-rate streak reaching 3 and one nudge.
+   show the low-rate streak reaching 3 and one nudge. (Quiet hours default to
+   22:00–08:00 and suppress reminders; the menu bar shows **quiet hours** when
+   that is why nothing fired.)
 4. Choose **Pause Blinko** from the menu bar. The camera indicator goes off and
    no further nudges or fallback reminders appear.
 5. Choose **Resume Blinko**. Monitoring restarts with a fresh rate estimate.
+6. To check the camera-denied fallback, deny camera access, then choose
+   **Enable Timed Reminders**; the first reminder is due after 20 min.
 
 ## Layout
 

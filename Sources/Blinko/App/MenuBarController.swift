@@ -140,6 +140,7 @@ final class MenuBarController: NSObject {
 
     private func statusLine(for snapshot: MonitorSnapshot) -> String {
         if snapshot.isPaused { return "Paused — no reminders" }
+        if !snapshot.isRunning { return "Stopped" }
         if snapshot.cameraDenied {
             return snapshot.fallbackEnabled
                 ? "Camera unavailable — timed reminders on"

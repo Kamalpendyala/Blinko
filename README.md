@@ -5,9 +5,10 @@ through the webcam and will nudge the user to blink. Local-first, sandboxed, no
 networking code.
 
 **Current status: Phase 0 (bootstrap) + Phase A (detection prototype) + Phase B
-(rate estimates and reminders) complete.** Phase C (duty-cycled scheduling and
-power management) is not built yet, so the camera runs continuously while
-monitoring is active.
+(rate estimates and reminders) implemented.** Phase B unit tests pass; the
+manual nudge/pause checks in the acceptance table are still pending. Phase C
+(duty-cycled scheduling and power management) is not built yet, so the camera
+runs continuously while monitoring is active.
 
 ---
 

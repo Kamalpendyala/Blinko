@@ -3,6 +3,7 @@ import BlinkoCore
 
 struct DebugView: View {
     @ObservedObject var model: DebugModel
+    let onPreviewNudge: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -14,6 +15,23 @@ struct DebugView: View {
                 metric("Open >", number(model.openThreshold))
                 metric("Valid face", percent(model.validFraction))
                 Spacer()
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 26) {
+                metric("Rate", rate(model.smoothedRate))
+                metric("Last burst", rate(model.lastBurstRate))
+                metric("Low streak", "\(model.lowStreak)/\(model.lowBurstsRequired)")
+                metric("Nudges", "\(model.nudgeCount)", emphasized: true)
+                Spacer()
+                if model.isPaused {
+                    Text("PAUSED")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Button("Preview Nudge") {
+                    onPreviewNudge()
+                }
+                .controlSize(.small)
             }
 
             SparklineView(
@@ -38,7 +56,7 @@ struct DebugView: View {
             }
 
             HStack(alignment: .top) {
-                Text(model.status)
+                Text(model.monitorStatus.isEmpty ? model.status : model.monitorStatus)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -53,7 +71,7 @@ struct DebugView: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Text("Camera indicator stays on while this window is open. Frames are processed in memory and never written to disk.")
+            Text("Camera stays on while monitoring is active (Phase C adds duty cycling). Frames are processed in memory and never written to disk.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -94,6 +112,11 @@ struct DebugView: View {
     private func number(_ value: Double?) -> String {
         guard let value else { return "—" }
         return String(format: "%.3f", value)
+    }
+
+    private func rate(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.1f/min", value)
     }
 
     private func percent(_ value: Double) -> String {

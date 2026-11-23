@@ -55,13 +55,15 @@ struct LaunchOptions {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var menuBar: MenuBarController?
-    private var pipeline: DetectionPipeline?
+    private var monitor: BlinkMonitor?
+    private var nudgePresenter: NudgePresenter?
     private var debugModel: DebugModel?
     private var debugWindow: DebugWindowController?
     private var options = LaunchOptions()
-    private var pipelineRunning = false
     private var replayURL: URL?
     private var recordURL: URL?
+    private var replayPipeline: DetectionPipeline?
+    private var resumeMonitoringAfterReplay = false
 
     private var isVerbose: Bool { options.exitAfterReplay || options.debugWindow }
 
@@ -80,24 +82,108 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         _ = NSApp.setActivationPolicy(.accessory)
 
+        nudgePresenter = NudgePresenter()
+
         let menuBar = MenuBarController()
         menuBar.onShowDebug = { [weak self] in self?.showDebugWindow() }
         menuBar.onReplay = { [weak self] in self?.chooseReplayFile() }
         menuBar.onRecord = { [weak self] in self?.chooseRecordingFile() }
+        menuBar.onTogglePause = { [weak self] in self?.togglePause() }
+        menuBar.onToggleFallback = { [weak self] in self?.toggleFallback() }
+        menuBar.onRetryCamera = { [weak self] in self?.monitor?.retryCamera() }
         menuBar.onQuit = { NSApp.terminate(nil) }
         self.menuBar = menuBar
 
-        if options.debugWindow || options.replayURL != nil {
+        if options.replayURL != nil {
+            menuBar.showReplayMode()
             showDebugWindow()
+            startReplayIfNeeded()
+        } else {
+            startMonitoring()
+            if options.debugWindow {
+                showDebugWindow()
+            }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        stopPipeline()
+        monitor?.stop()
+        monitor = nil
+        replayPipeline?.shutdown()
+        replayPipeline = nil
+        debugModel?.stop()
+        nudgePresenter?.dismiss()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
+    }
+
+    // MARK: - Live monitoring
+
+    private func startMonitoring() {
+        guard monitor == nil else { return }
+
+        let monitor = BlinkMonitor(clock: SystemClock(), settings: Settings())
+        monitor.onSnapshot = { [weak self] snapshot in
+            self?.menuBar?.update(snapshot: snapshot)
+            self?.debugModel?.update(monitor: snapshot)
+        }
+        monitor.onSample = { [weak self] sample, detector in
+            self?.debugModel?.ingest(sample: sample, detector: detector)
+        }
+        monitor.onBlink = { [weak self] blink in
+            self?.debugModel?.record(blink: blink)
+        }
+        monitor.onNudge = { [weak self] reason in
+            self?.presentNudge(reason: reason)
+        }
+        monitor.onError = { [weak self] error in
+            self?.debugModel?.setStatus(error.description)
+            self?.log("camera error: \(error.description)")
+        }
+        self.monitor = monitor
+
+        monitor.start(recorder: makeRecorderIfNeeded())
+    }
+
+    private func togglePause() {
+        guard let monitor else { return }
+        if monitor.isPaused {
+            monitor.resume()
+        } else {
+            monitor.pause()
+        }
+    }
+
+    private func toggleFallback() {
+        guard let monitor else { return }
+        monitor.setFallbackRemindersEnabled(!monitor.settings.fallbackRemindersEnabled)
+    }
+
+    private func presentNudge(reason: NudgeReason) {
+        nudgePresenter?.present(
+            reason: reason,
+            soundEnabled: monitor?.settings.soundEnabled ?? false
+        )
+        menuBar?.pulse()
+
+        switch reason {
+        case .lowRate: log("nudge: low blink rate")
+        case .timedFallback: log("nudge: timed fallback")
+        }
+    }
+
+    private func makeRecorderIfNeeded() -> LandmarkCSVRecorder? {
+        guard let url = recordURL else { return nil }
+        do {
+            let recorder = try LandmarkCSVRecorder(url: url)
+            debugModel?.setRecording(true)
+            return recorder
+        } catch {
+            log("could not open \(url.lastPathComponent) for recording: \(error.localizedDescription)")
+            return nil
+        }
     }
 
     // MARK: - Debug window
@@ -112,68 +198,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if debugWindow == nil {
-            let controller = DebugWindowController(model: model)
+            let controller = DebugWindowController(model: model) { [weak self] in
+                self?.previewNudge()
+            }
             controller.onClose = { [weak self] in
                 guard let self else { return }
-                self.stopPipeline()
-                self.debugModel?.setStatus("Stopped. Reopen from the menu bar to start again.")
+                self.debugModel?.stop()
+                if self.replayPipeline != nil || self.resumeMonitoringAfterReplay {
+                    self.stopReplayAndMaybeResumeMonitoring()
+                }
             }
             debugWindow = controller
         }
-        debugWindow?.show()
 
-        if !pipelineRunning {
-            startPipeline(model: model)
-        }
+        debugWindow?.show()
+        model.start()
     }
 
-    private func startPipeline(model: DebugModel) {
-        log("starting pipeline (replay=\(replayURL?.lastPathComponent ?? "none"))")
-        var recorder: LandmarkCSVRecorder?
-        if let url = recordURL {
-            do {
-                recorder = try LandmarkCSVRecorder(url: url)
-                model.setStatus("Recording landmarks to \(url.lastPathComponent)…")
-                model.setRecording(true)
-            } catch {
-                model.setStatus("Could not open \(url.lastPathComponent) for recording: \(error.localizedDescription)")
-            }
+    private func previewNudge() {
+        nudgePresenter?.present(
+            reason: .lowRate,
+            soundEnabled: monitor?.settings.soundEnabled ?? false
+        )
+        menuBar?.pulse()
+    }
+
+    // MARK: - Replay
+
+    private func startReplayIfNeeded() {
+        guard let url = replayURL else { return }
+
+        let model = debugModel ?? DebugModel()
+        if debugModel == nil {
+            debugModel = model
         }
 
-        let pipeline = DetectionPipeline(recorder: recorder)
+        stopReplayPipeline()
+        model.clearMonitorState()
+
+        let pipeline = DetectionPipeline(recorder: makeRecorderIfNeeded())
         pipeline.delegate = self
-        self.pipeline = pipeline
-        pipelineRunning = true
+        replayPipeline = pipeline
+
         model.start()
         model.resetCounters()
-
-        if let replayURL {
-            model.setStatus("Replaying \(replayURL.lastPathComponent)…")
-            pipeline.startReplay(url: replayURL, pace: !options.exitAfterReplay)
-            return
-        }
-
-        model.setStatus("Requesting camera access…")
-        CameraFrameSource.requestCameraAccess { [weak self] granted in
-            guard let self, self.pipelineRunning else { return }
-            if granted {
-                model.setStatus("Camera running — blink deliberately to check detection.")
-                self.pipeline?.startCamera()
-            } else {
-                model.setStatus(
-                    "Camera access denied. Enable Blinko in System Settings › Privacy & Security › Camera, "
-                    + "or launch with --replay <file.csv>."
-                )
-            }
-        }
+        model.setStatus("Replaying \(url.lastPathComponent)…")
+        pipeline.startReplay(url: url, pace: !options.exitAfterReplay)
     }
 
-    private func stopPipeline() {
-        pipeline?.shutdown()
-        pipeline = nil
-        pipelineRunning = false
+    private func stopReplayPipeline() {
+        replayPipeline?.shutdown()
+        replayPipeline = nil
         debugModel?.stop()
-        debugModel?.setRecording(false)
+    }
+
+    private func stopReplayAndMaybeResumeMonitoring() {
+        stopReplayPipeline()
+        guard resumeMonitoringAfterReplay else { return }
+        resumeMonitoringAfterReplay = false
+        startMonitoring()
     }
 
     // MARK: - File pickers (sandbox-safe access to recorded sessions)
@@ -187,9 +270,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.prompt = "Replay"
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
+
             self.replayURL = url
             self.recordURL = nil
-            self.restartPipeline()
+            self.resumeMonitoringAfterReplay = self.monitor != nil
+            self.monitor?.stop()
+            self.monitor = nil
+            self.menuBar?.showReplayMode()
+            self.showDebugWindow()
+            self.startReplayIfNeeded()
         }
     }
 
@@ -201,15 +290,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.prompt = "Record"
         panel.begin { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
-            self.recordURL = url
-            self.replayURL = nil
-            self.restartPipeline()
+
+            do {
+                let recorder = try LandmarkCSVRecorder(url: url)
+                self.recordURL = url
+
+                if let monitor = self.monitor {
+                    monitor.setRecorder(recorder)
+                    self.debugModel?.setRecording(true)
+                    self.debugModel?.setStatus("Recording landmarks to \(url.lastPathComponent)…")
+                } else if self.replayPipeline != nil || self.replayURL != nil {
+                    self.startReplayIfNeeded()
+                } else {
+                    self.startMonitoring()
+                }
+            } catch {
+                self.showError("Could not open \(url.lastPathComponent) for recording.", error)
+            }
         }
     }
 
-    private func restartPipeline() {
-        stopPipeline()
-        showDebugWindow()
+    private func showError(_ message: String, _ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = message
+        alert.informativeText = error.localizedDescription
+        alert.alertStyle = .warning
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
     }
 }
 
@@ -241,6 +348,8 @@ extension AppDelegate: DetectionPipelineDelegate {
         let baseline = pipeline.detector.baseline.map { String(format: "%.3f", $0) } ?? "n/a"
         log("replay finished: frames=\(frames) blinks=\(blinks) baseline=\(baseline)")
 
+        replayPipeline = nil
+
         if options.exitAfterReplay {
             FileHandle.standardError.write(
                 Data("[replay] frames=\(frames) blinks=\(blinks) baseline=\(baseline)\n".utf8)
@@ -248,6 +357,11 @@ extension AppDelegate: DetectionPipelineDelegate {
             NSApp.terminate(nil)
             return
         }
+
         debugModel?.setStatus("Replay finished.")
+        if resumeMonitoringAfterReplay {
+            resumeMonitoringAfterReplay = false
+            startMonitoring()
+        }
     }
 }

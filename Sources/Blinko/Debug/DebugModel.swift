@@ -28,6 +28,14 @@ final class DebugModel: ObservableObject {
     @Published private(set) var framesSeen = 0
     @Published private(set) var isRecording = false
 
+    @Published private(set) var smoothedRate: Double?
+    @Published private(set) var lastBurstRate: Double?
+    @Published private(set) var lowStreak = 0
+    @Published private(set) var lowBurstsRequired = 3
+    @Published private(set) var nudgeCount = 0
+    @Published private(set) var isPaused = false
+    @Published private(set) var monitorStatus = ""
+
     private var pending: [PlotSample] = []
     private var nextID = 0
     private var validCount = 0
@@ -66,6 +74,8 @@ final class DebugModel: ObservableObject {
 
     func ingest(sample: EyeSample, detector: DetectorSample) {
         assert(Thread.isMainThread)
+        // No debug window: do not do per-frame UI work while monitoring.
+        guard flushTimer != nil else { return }
 
         pending.append(
             PlotSample(
@@ -93,8 +103,31 @@ final class DebugModel: ObservableObject {
 
     func record(blink: BlinkEvent) {
         assert(Thread.isMainThread)
+        guard flushTimer != nil else { return }
         blinkCount += 1
         blinkTimestamps.append(blink.end)
+    }
+
+    func update(monitor: MonitorSnapshot) {
+        assert(Thread.isMainThread)
+        smoothedRate = monitor.smoothedRate
+        lastBurstRate = monitor.lastBurstRate
+        lowStreak = monitor.lowStreak
+        lowBurstsRequired = monitor.lowBurstsRequired
+        nudgeCount = monitor.nudgeCount
+        isPaused = monitor.isPaused
+        monitorStatus = monitor.status
+    }
+
+    /// Drops live-monitor fields when switching to replay/diagnostic mode.
+    func clearMonitorState() {
+        assert(Thread.isMainThread)
+        smoothedRate = nil
+        lastBurstRate = nil
+        lowStreak = 0
+        nudgeCount = 0
+        isPaused = false
+        monitorStatus = ""
     }
 
     func resetCounters() {

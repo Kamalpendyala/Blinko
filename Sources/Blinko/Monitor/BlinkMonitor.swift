@@ -8,7 +8,11 @@ struct MonitorSnapshot: Equatable {
     var isPaused: Bool
     var cameraDenied: Bool
     var fallbackEnabled: Bool
+    var quietHoursEnabled: Bool
     var quietHoursActive: Bool
+    var facePresent: Bool
+    var secondsSinceBlink: Double?
+    var noBlinkInterval: Double
     var smoothedRate: Double?
     var lastBurstRate: Double?
     var lowStreak: Int
@@ -38,16 +42,22 @@ final class BlinkMonitor {
     private let rateEstimator = RateEstimator()
     private let nudgePolicy = NudgePolicy()
     private let burst = BurstAccumulator()
+    private let gapPolicy: BlinkGapPolicy
 
     private var pipeline: DetectionPipeline?
     private var recorder: LandmarkCSVRecorder?
     private var heartbeatTimer: Timer?
     private var status = "Starting…"
     private var lastSnapshot: MonitorSnapshot?
+    private var lastValidFaceAt: TimeInterval?
+    private var deliveredNudgeCount = 0
 
     init(clock: Clock = SystemClock(), settings: Settings = Settings()) {
         self.clock = clock
         self.settings = settings
+        self.gapPolicy = BlinkGapPolicy(
+            config: BlinkGapPolicyConfig(interval: settings.noBlinkInterval)
+        )
     }
 
     // MARK: - Lifecycle
@@ -60,9 +70,13 @@ final class BlinkMonitor {
         isRunning = true
         isPaused = false
         cameraDenied = false
+        deliveredNudgeCount = 0
         rateEstimator.reset()
         nudgePolicy.reset()
         burst.reset()
+        gapPolicy.reset()
+        gapPolicy.start(at: clock.monotonicNow)
+        lastValidFaceAt = nil
 
         startHeartbeat()
         requestCamera()
@@ -85,6 +99,8 @@ final class BlinkMonitor {
         recorder = nil
         burst.reset()
         nudgePolicy.stopFallback()
+        gapPolicy.reset()
+        lastValidFaceAt = nil
         publish()
     }
 
@@ -99,6 +115,8 @@ final class BlinkMonitor {
         burst.reset()
         nudgePolicy.resetLowStreak()
         nudgePolicy.stopFallback()
+        gapPolicy.reset()
+        lastValidFaceAt = nil
         setStatus("Paused — camera off, no reminders.")
         publish()
     }
@@ -111,6 +129,9 @@ final class BlinkMonitor {
         rateEstimator.reset()
         nudgePolicy.resetLowStreak()
         burst.reset()
+        gapPolicy.reset()
+        gapPolicy.start(at: clock.monotonicNow)
+        lastValidFaceAt = nil
 
         if cameraDenied {
             if settings.fallbackRemindersEnabled {
@@ -132,6 +153,9 @@ final class BlinkMonitor {
 
         cameraDenied = false
         nudgePolicy.stopFallback()
+        gapPolicy.reset()
+        gapPolicy.start(at: clock.monotonicNow)
+        lastValidFaceAt = nil
         requestCamera()
     }
 
@@ -150,6 +174,16 @@ final class BlinkMonitor {
     func setSoundEnabled(_ enabled: Bool) {
         assert(Thread.isMainThread)
         settings.soundEnabled = enabled
+        publish()
+    }
+
+    func setQuietHoursEnabled(_ enabled: Bool) {
+        assert(Thread.isMainThread)
+        settings.quietHours.enabled = enabled
+        if enabled {
+            // Do not fire immediately when quiet hours switch on.
+            gapPolicy.start(at: clock.monotonicNow)
+        }
         publish()
     }
 
@@ -192,6 +226,9 @@ final class BlinkMonitor {
         pipeline.delegate = self
         self.pipeline = pipeline
         burst.begin(at: clock.monotonicNow)
+        gapPolicy.reset()
+        gapPolicy.start(at: clock.monotonicNow)
+        lastValidFaceAt = nil
         pipeline.startCamera()
         setStatus("Monitoring — camera on.")
         publish()
@@ -205,6 +242,8 @@ final class BlinkMonitor {
         pipeline = nil
         burst.reset()
         nudgePolicy.stopFallback()
+        gapPolicy.reset()
+        lastValidFaceAt = nil
         if settings.fallbackRemindersEnabled {
             nudgePolicy.beginFallback(at: clock.monotonicNow)
         }
@@ -219,6 +258,10 @@ final class BlinkMonitor {
 
         onSample?(sample, detector)
 
+        if sample.valid {
+            lastValidFaceAt = sample.timestamp
+        }
+
         if burst.startedAt == nil {
             burst.begin(at: sample.timestamp)
         }
@@ -232,6 +275,7 @@ final class BlinkMonitor {
     private func ingest(blink: BlinkEvent) {
         guard isRunning, !isPaused else { return }
         burst.recordBlink()
+        gapPolicy.recordBlink(at: blink.end)
         onBlink?(blink)
     }
 
@@ -239,27 +283,17 @@ final class BlinkMonitor {
         guard let summary = burst.finish(at: now) else { return }
         burst.begin(at: now)
 
-        let update = rateEstimator.ingest(summary)
-        guard update.accepted, let smoothed = update.smoothedRate else {
-            publish()
-            return
-        }
-
-        let decision = nudgePolicy.evaluate(
-            rate: smoothed,
-            now: now,
-            suppression: currentSuppression(includeCameraUnavailable: false)
-        )
-        if case let .nudge(reason) = decision {
-            deliverNudge(reason)
-        }
+        // The rate estimate is diagnostic in Phase B; reminders come from the
+        // no-blink watchdog so they can repeat at a short cadence.
+        rateEstimator.ingest(summary)
         publish()
     }
 
     // MARK: - Heartbeat (fallback + quiet-hours/menu refresh)
 
     private func startHeartbeat() {
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+        // 2 Hz keeps the 5 s watchdog accurate without measurable CPU cost.
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
             self?.heartbeat()
         }
         RunLoop.main.add(timer, forMode: .common)
@@ -269,9 +303,23 @@ final class BlinkMonitor {
     private func heartbeat() {
         guard isRunning else { return }
 
+        let now = clock.monotonicNow
+        let facePresent = lastValidFaceAt.map { now - $0 <= 2 } ?? false
+
+        if !isPaused, !cameraDenied {
+            let decision = gapPolicy.evaluate(
+                now: now,
+                facePresent: facePresent,
+                suppression: currentSuppression(includeCameraUnavailable: false)
+            )
+            if case let .nudge(reason) = decision {
+                deliverNudge(reason)
+            }
+        }
+
         if cameraDenied, settings.fallbackRemindersEnabled, !isPaused {
             let decision = nudgePolicy.evaluateFallback(
-                now: clock.monotonicNow,
+                now: now,
                 enabled: true,
                 cameraUnavailable: true,
                 suppression: currentSuppression(includeCameraUnavailable: false)
@@ -287,7 +335,10 @@ final class BlinkMonitor {
     // MARK: - Nudges
 
     private func deliverNudge(_ reason: NudgeReason) {
+        deliveredNudgeCount += 1
         switch reason {
+        case .noBlink:
+            setStatus("Nudged: no blink for \(Int(settings.noBlinkInterval)) s.")
         case .lowRate:
             setStatus("Nudged: blink rate stayed low.")
         case .timedFallback:
@@ -312,17 +363,22 @@ final class BlinkMonitor {
     }
 
     private func makeSnapshot() -> MonitorSnapshot {
-        MonitorSnapshot(
+        let now = clock.monotonicNow
+        return MonitorSnapshot(
             isRunning: isRunning,
             isPaused: isPaused,
             cameraDenied: cameraDenied,
             fallbackEnabled: settings.fallbackRemindersEnabled,
+            quietHoursEnabled: settings.quietHours.enabled,
             quietHoursActive: settings.quietHours.isActive(at: clock.now),
+            facePresent: lastValidFaceAt.map { now - $0 <= 2 } ?? false,
+            secondsSinceBlink: gapPolicy.secondsSinceBlink(at: now),
+            noBlinkInterval: settings.noBlinkInterval,
             smoothedRate: rateEstimator.smoothedRate,
             lastBurstRate: rateEstimator.lastBurstRate,
             lowStreak: nudgePolicy.lowStreak,
             lowBurstsRequired: nudgePolicy.config.lowBurstsRequired,
-            nudgeCount: nudgePolicy.nudgeCount,
+            nudgeCount: deliveredNudgeCount,
             status: status
         )
     }

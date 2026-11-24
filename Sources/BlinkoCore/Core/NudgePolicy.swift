@@ -22,6 +22,9 @@ public struct NudgeSuppression: OptionSet, Equatable {
 }
 
 public enum NudgeReason: Equatable {
+    /// No blink for the configured gap (the active Phase B trigger).
+    case noBlink
+    /// Smoothed blink rate stayed below the threshold (retained for Phase C).
     case lowRate
     case timedFallback
 }

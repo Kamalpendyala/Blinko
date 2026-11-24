@@ -7,6 +7,7 @@ final class MenuBarController: NSObject {
     var onRecord: (() -> Void)?
     var onTogglePause: (() -> Void)?
     var onToggleFallback: (() -> Void)?
+    var onToggleQuietHours: (() -> Void)?
     var onRetryCamera: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -14,6 +15,7 @@ final class MenuBarController: NSObject {
     private let statusLineItem: NSMenuItem
     private let pauseItem: NSMenuItem
     private let fallbackItem: NSMenuItem
+    private let quietHoursItem: NSMenuItem
     private let retryItem: NSMenuItem
 
     override init() {
@@ -21,6 +23,7 @@ final class MenuBarController: NSObject {
         statusLineItem = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
         pauseItem = NSMenuItem(title: "Pause Blinko", action: nil, keyEquivalent: "p")
         fallbackItem = NSMenuItem(title: "Enable Timed Reminders", action: nil, keyEquivalent: "")
+        quietHoursItem = NSMenuItem(title: "Quiet Hours (22:00–08:00)", action: nil, keyEquivalent: "")
         retryItem = NSMenuItem(title: "Retry Camera", action: nil, keyEquivalent: "")
 
         super.init()
@@ -39,6 +42,9 @@ final class MenuBarController: NSObject {
         fallbackItem.target = self
         fallbackItem.action = #selector(toggleFallback)
         fallbackItem.isHidden = true
+
+        quietHoursItem.target = self
+        quietHoursItem.action = #selector(toggleQuietHours)
 
         retryItem.target = self
         retryItem.action = #selector(retryCamera)
@@ -77,6 +83,7 @@ final class MenuBarController: NSObject {
         menu.addItem(.separator())
         menu.addItem(pauseItem)
         menu.addItem(fallbackItem)
+        menu.addItem(quietHoursItem)
         menu.addItem(retryItem)
         menu.addItem(.separator())
         menu.addItem(debugItem)
@@ -104,6 +111,10 @@ final class MenuBarController: NSObject {
 
         retryItem.isHidden = !snapshot.cameraDenied
 
+        quietHoursItem.state = snapshot.quietHoursEnabled ? .on : .off
+        quietHoursItem.isEnabled = snapshot.isRunning
+        quietHoursItem.isHidden = false
+
         statusLineItem.title = statusLine(for: snapshot)
     }
 
@@ -113,6 +124,7 @@ final class MenuBarController: NSObject {
         statusLineItem.title = "Replay mode — reminders off"
         pauseItem.isEnabled = false
         fallbackItem.isHidden = true
+        quietHoursItem.isHidden = true
         retryItem.isHidden = true
     }
 
@@ -153,8 +165,8 @@ final class MenuBarController: NSObject {
         if snapshot.quietHoursActive {
             return "\(rate) · quiet hours"
         }
-        if snapshot.lowStreak > 0 {
-            return "\(rate) · low \(snapshot.lowStreak)/\(snapshot.lowBurstsRequired)"
+        if snapshot.facePresent, let gap = snapshot.secondsSinceBlink {
+            return String(format: "%@ · %.1fs no blink", rate, gap)
         }
         return rate
     }
@@ -179,6 +191,10 @@ final class MenuBarController: NSObject {
 
     @objc private func toggleFallback() {
         onToggleFallback?()
+    }
+
+    @objc private func toggleQuietHours() {
+        onToggleQuietHours?()
     }
 
     @objc private func retryCamera() {

@@ -35,6 +35,10 @@ final class DebugModel: ObservableObject {
     @Published private(set) var nudgeCount = 0
     @Published private(set) var isPaused = false
     @Published private(set) var monitorStatus = ""
+    @Published private(set) var secondsSinceBlink: Double?
+    @Published private(set) var noBlinkInterval: Double = 5
+    @Published private(set) var facePresent = false
+    @Published private(set) var quietHoursActive = false
 
     private var pending: [PlotSample] = []
     private var nextID = 0
@@ -117,6 +121,10 @@ final class DebugModel: ObservableObject {
         nudgeCount = monitor.nudgeCount
         isPaused = monitor.isPaused
         monitorStatus = monitor.status
+        secondsSinceBlink = monitor.secondsSinceBlink
+        noBlinkInterval = monitor.noBlinkInterval
+        facePresent = monitor.facePresent
+        quietHoursActive = monitor.quietHoursActive
     }
 
     /// Drops live-monitor fields when switching to replay/diagnostic mode.
@@ -128,6 +136,9 @@ final class DebugModel: ObservableObject {
         nudgeCount = 0
         isPaused = false
         monitorStatus = ""
+        secondsSinceBlink = nil
+        facePresent = false
+        quietHoursActive = false
     }
 
     func resetCounters() {

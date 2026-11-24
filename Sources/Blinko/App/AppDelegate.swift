@@ -90,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onRecord = { [weak self] in self?.chooseRecordingFile() }
         menuBar.onTogglePause = { [weak self] in self?.togglePause() }
         menuBar.onToggleFallback = { [weak self] in self?.toggleFallback() }
+        menuBar.onToggleQuietHours = { [weak self] in self?.toggleQuietHours() }
         menuBar.onRetryCamera = { [weak self] in self?.monitor?.retryCamera() }
         menuBar.onQuit = { NSApp.terminate(nil) }
         self.menuBar = menuBar
@@ -161,6 +162,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.setFallbackRemindersEnabled(!monitor.settings.fallbackRemindersEnabled)
     }
 
+    private func toggleQuietHours() {
+        guard let monitor else { return }
+        monitor.setQuietHoursEnabled(!monitor.settings.quietHours.enabled)
+    }
+
     private func presentNudge(reason: NudgeReason) {
         nudgePresenter?.present(
             reason: reason,
@@ -169,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar?.pulse()
 
         switch reason {
+        case .noBlink: log("nudge: no blink for \(Int(monitor?.settings.noBlinkInterval ?? 0)) s")
         case .lowRate: log("nudge: low blink rate")
         case .timedFallback: log("nudge: timed fallback")
         }
@@ -217,7 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func previewNudge() {
         nudgePresenter?.present(
-            reason: .lowRate,
+            reason: .noBlink,
             soundEnabled: monitor?.settings.soundEnabled ?? false
         )
         menuBar?.pulse()

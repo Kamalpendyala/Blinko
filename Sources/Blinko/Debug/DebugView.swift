@@ -20,9 +20,14 @@ struct DebugView: View {
             HStack(alignment: .firstTextBaseline, spacing: 26) {
                 metric("Rate", rate(model.smoothedRate))
                 metric("Last burst", rate(model.lastBurstRate))
-                metric("Low streak", "\(model.lowStreak)/\(model.lowBurstsRequired)")
+                metric("No blink", noBlink())
                 metric("Nudges", "\(model.nudgeCount)", emphasized: true)
                 Spacer()
+                if model.quietHoursActive {
+                    Text("QUIET HOURS")
+                        .font(.caption.bold())
+                        .foregroundStyle(.blue)
+                }
                 if model.isPaused {
                     Text("PAUSED")
                         .font(.caption.bold())
@@ -121,6 +126,11 @@ struct DebugView: View {
 
     private func percent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
+    }
+
+    private func noBlink() -> String {
+        guard model.facePresent, let gap = model.secondsSinceBlink else { return "—" }
+        return String(format: "%.1f / %.0fs", gap, model.noBlinkInterval)
     }
 }
 

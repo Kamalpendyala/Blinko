@@ -17,7 +17,7 @@ public struct BlinkGapPolicyConfig: Equatable {
 /// eyes open it re-arms every `interval`, so the reminder repeats for as long
 /// as blinking stops. A blink restarts the countdown immediately.
 public final class BlinkGapPolicy {
-    public let config: BlinkGapPolicyConfig
+    public private(set) var config: BlinkGapPolicyConfig
 
     public private(set) var nudgeCount = 0
     public private(set) var lastBlinkAt: TimeInterval?
@@ -26,6 +26,14 @@ public final class BlinkGapPolicy {
 
     public init(config: BlinkGapPolicyConfig = BlinkGapPolicyConfig()) {
         self.config = config
+    }
+
+    /// Changes the interval and re-arms from the last blink so the new value
+    /// takes effect without waiting for another heartbeat.
+    public func setInterval(_ interval: TimeInterval, at now: TimeInterval) {
+        guard interval > 0 else { return }
+        config.interval = interval
+        nextDue = (lastBlinkAt ?? now) + interval
     }
 
     /// Starts the countdown, e.g. when monitoring begins or resumes.

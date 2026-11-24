@@ -22,7 +22,10 @@ runs continuously while monitoring is active.
   in the debug window as a diagnostic.
 - Prominent non-activating reminder card centered on the active screen: large
   icon, bold title, accent border, never steals focus, clicks pass through,
-  auto-dismisses in 2.5 s, plus a menu bar icon pulse.
+  fades in/out gently, and hides as soon as a blink is detected (or after the
+  configured auto-dismiss duration, default 2.5 s).
+- **Blink Interval** and **Dismiss After** menu-bar submenus with presets plus
+  a **Custom…** numeric field, so both timers can be changed without restarting.
 - One-click **Pause Blinko / Resume Blinko**; nothing fires while paused.
 - **Quiet Hours (22:00–08:00)** menu toggle. Off by default in this tuning
   build so the 5 s reminder is easy to observe.
@@ -33,8 +36,8 @@ runs continuously while monitoring is active.
 - Replay harness that runs a recorded landmark CSV through the same pipeline.
 - Debug-only landmark CSV recorder (derived eye points only — never pixels).
 - Menu bar item (`LSUIElement`), no Dock icon, sandboxed with camera access.
-- 43 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…07, GAP-01…06,
-  QH-01…02, CSV round-trip and the clock seam.
+- 46 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…07, GAP-01…07,
+  QH-01…02, Settings round-trips, CSV round-trip and the clock seam.
 
 ## Requirements
 
@@ -88,6 +91,8 @@ The menu bar menu contains:
   or fallback reminders fire while paused.
 - **Enable / Disable Timed Reminders** — shown when the camera is unavailable.
 - **Quiet Hours (22:00–08:00)** — checkmark toggle; suppresses reminders when on.
+- **Blink Interval: N s** — presets 3/5/10/15/20/30 s plus **Custom…** (1–300 s).
+- **Dismiss After: N s** — presets 1/2.5/5/10 s, **Never**, plus **Custom…** (0.5–60 s).
 - **Retry Camera** — shown when camera access was denied.
 - **Show Detection Debug…** — live trace, rate and policy state.
 - **Replay Recorded Session…** and **Record Landmark Session…**.
@@ -112,7 +117,7 @@ command line**. Use the menu bar items instead:
 - Red ticks at the top: detected blinks.
 - Header: blink count, latest openness, baseline, thresholds, valid-face share.
 - Second row: smoothed rate, last burst rate, seconds since the last blink
-  (`gap / interval`), nudge count.
+  (`gap / interval`), auto-dismiss duration, nudge count.
 - **Preview Nudge** shows the centered reminder card without touching policy state.
 
 Baseline is estimated automatically from the first valid frames. The explicit
@@ -167,10 +172,14 @@ Manual test procedure:
 |------|--------|
 | RE-01…04 unit tests | ✅ passing |
 | NP-01…07 unit tests | ✅ passing (NP-07b covers no catch-up after suppression) |
-| GAP-01…06 unit tests | ✅ passing (fires at 5 s, repeats, blink resets, no-face/pause suppression) |
+| GAP-01…07 unit tests | ✅ passing (fires at 5 s, repeats, blink resets, no-face/pause suppression, interval changes) |
+| Settings round-trip tests | ✅ passing for the adjustable intervals |
 | QH-01…02 unit tests | ✅ passing |
 | A reminder fires after 5 s without a blink | ✅ `BlinkGapPolicy`, repeats every 5 s |
 | A blink resets the reminder timer | ✅ covered by GAP-02 |
+| A blink hides a visible reminder immediately | ✅ wired through `NudgePresenter.dismiss()`; needs a camera check |
+| Blink interval adjustable from the menu bar | ✅ presets + Custom… (1–300 s) |
+| Auto-dismiss adjustable from the menu bar | ✅ presets + Never + Custom… (0.5–60 s) |
 | One-click pause works | ✅ implemented; needs a manual click-through |
 | Nothing fires while paused | ✅ policy suppression + heartbeat guard; covered by GAP-05 |
 | Reminder card never steals focus, dismisses < 3 s | ✅ centered card, 2.5 s; needs a visual check |
@@ -184,13 +193,17 @@ Manual Phase B check:
 3. Keep your eyes open without blinking. After ~5 s the card appears; if you
    still do not blink it reappears every ~5 s. The debug row shows the gap
    counter climbing to `5 / 5`.
-4. Blink: the gap counter resets and reminders stop until another 5 s pass.
-5. Choose **Pause Blinko** from the menu bar. The camera indicator goes off and
+4. Blink while the card is visible: it fades out immediately instead of waiting
+   for the auto-dismiss timer, and the gap counter resets.
+5. Change **Blink Interval** and **Dismiss After** from the menu bar (presets or
+   **Custom…**) and confirm the new values appear in the menu titles and debug
+   row. With **Dismiss After → Never**, the card stays up until a blink.
+6. Choose **Pause Blinko** from the menu bar. The camera indicator goes off and
    no further reminders appear.
-6. Choose **Resume Blinko**. Monitoring restarts with a fresh gap timer.
-7. Quiet hours are off by default. Toggle **Quiet Hours (22:00–08:00)** to verify
+7. Choose **Resume Blinko**. Monitoring restarts with a fresh gap timer.
+8. Quiet hours are off by default. Toggle **Quiet Hours (22:00–08:00)** to verify
    that reminders are suppressed while it is on.
-8. To check the camera-denied fallback, deny camera access, then choose
+9. To check the camera-denied fallback, deny camera access, then choose
    **Enable Timed Reminders**; the first reminder is due after 20 min.
 
 ## Layout
@@ -199,7 +212,7 @@ Manual Phase B check:
 Sources/
   BlinkoCore/                     pure logic, no AVFoundation/Vision/AppKit
     Core/Clock.swift              Clock, SystemClock, FakeClock
-    Core/BlinkGapPolicy.swift     no-blink watchdog, 5 s cadence (GAP-01…06)
+    Core/BlinkGapPolicy.swift     no-blink watchdog, adjustable cadence (GAP-01…07)
     Core/RateEstimator.swift      BurstSummary, RateEstimator (RE-01…04)
     Core/BurstAccumulator.swift   valid-face seconds + blink count per burst
     Core/NudgePolicy.swift        rate/fallback policy, suppression (NP-01…07)
@@ -258,9 +271,10 @@ inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
   the camera stays on while monitoring is active, so use **Pause Blinko** when
   you do not want it on. The nudge panel can also appear over a fullscreen app
   until Phase C adds fullscreen suppression.
-- **No Settings UI yet:** the 5 s no-blink interval, sound (off), quiet hours
-  (off by default, menu toggle) and the 12 s / 60 s cadence are compile-time or
-  menu-bar settings. Phase D adds the full UI.
+- **No Settings UI yet:** the blink interval (default 5 s) and auto-dismiss
+  duration (default 2.5 s) are adjustable from the menu bar for this session;
+  sound (off) and quiet hours (off by default, menu toggle) are also menu-bar or
+  compile-time settings. Phase D adds a persistent Settings UI.
 - **Fallback interval is fixed at 20 min** (20-20-20 style) and is offered only
   when the camera is unavailable or denied.
 - **Policy state is in memory:** pause state, nudge history and daily aggregates

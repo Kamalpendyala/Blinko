@@ -8,6 +8,8 @@ final class MenuBarController: NSObject {
     var onTogglePause: (() -> Void)?
     var onToggleFallback: (() -> Void)?
     var onToggleQuietHours: (() -> Void)?
+    var onSetBlinkInterval: ((Double) -> Void)?
+    var onSetAutoDismiss: ((Double) -> Void)?
     var onRetryCamera: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -16,7 +18,16 @@ final class MenuBarController: NSObject {
     private let pauseItem: NSMenuItem
     private let fallbackItem: NSMenuItem
     private let quietHoursItem: NSMenuItem
+    private let blinkIntervalItem = NSMenuItem(title: "Blink Interval", action: nil, keyEquivalent: "")
+    private let autoDismissItem = NSMenuItem(title: "Dismiss After", action: nil, keyEquivalent: "")
     private let retryItem: NSMenuItem
+    private var blinkPresetItems: [(seconds: Double, item: NSMenuItem)] = []
+    private var autoDismissPresetItems: [(seconds: Double, item: NSMenuItem)] = []
+    private let blinkCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
+    private let autoDismissCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
+    private let autoDismissNeverItem = NSMenuItem(title: "Never", action: nil, keyEquivalent: "")
+    private var currentNoBlinkInterval: Double = 5
+    private var currentAutoDismissSeconds: Double = 2.5
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -49,6 +60,8 @@ final class MenuBarController: NSObject {
         retryItem.target = self
         retryItem.action = #selector(retryCamera)
         retryItem.isHidden = true
+
+        configureIntervalMenus()
 
         let debugItem = NSMenuItem(
             title: "Show Detection Debug…",
@@ -86,6 +99,9 @@ final class MenuBarController: NSObject {
         menu.addItem(quietHoursItem)
         menu.addItem(retryItem)
         menu.addItem(.separator())
+        menu.addItem(blinkIntervalItem)
+        menu.addItem(autoDismissItem)
+        menu.addItem(.separator())
         menu.addItem(debugItem)
         menu.addItem(replayItem)
         menu.addItem(recordItem)
@@ -93,6 +109,138 @@ final class MenuBarController: NSObject {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    // MARK: - Interval menus
+
+    private func configureIntervalMenus() {
+        let blinkMenu = NSMenu()
+        for seconds in [3.0, 5.0, 10.0, 15.0, 20.0, 30.0] {
+            let item = NSMenuItem(
+                title: "\(Self.secondsText(seconds)) s",
+                action: #selector(selectBlinkPreset(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = NSNumber(value: seconds)
+            blinkMenu.addItem(item)
+            blinkPresetItems.append((seconds, item))
+        }
+        blinkMenu.addItem(.separator())
+        blinkCustomItem.target = self
+        blinkCustomItem.action = #selector(customBlinkInterval)
+        blinkMenu.addItem(blinkCustomItem)
+        blinkIntervalItem.submenu = blinkMenu
+
+        let dismissMenu = NSMenu()
+        for seconds in [1.0, 2.5, 5.0, 10.0] {
+            let item = NSMenuItem(
+                title: "\(Self.secondsText(seconds)) s",
+                action: #selector(selectAutoDismissPreset(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = NSNumber(value: seconds)
+            dismissMenu.addItem(item)
+            autoDismissPresetItems.append((seconds, item))
+        }
+        dismissMenu.addItem(.separator())
+        autoDismissNeverItem.target = self
+        autoDismissNeverItem.action = #selector(selectAutoDismissPreset(_:))
+        autoDismissNeverItem.representedObject = NSNumber(value: 0)
+        dismissMenu.addItem(autoDismissNeverItem)
+        autoDismissCustomItem.target = self
+        autoDismissCustomItem.action = #selector(customAutoDismiss)
+        dismissMenu.addItem(autoDismissCustomItem)
+        autoDismissItem.submenu = dismissMenu
+    }
+
+    private func updateIntervalMenus() {
+        blinkIntervalItem.title = "Blink Interval: \(Self.secondsText(currentNoBlinkInterval)) s"
+        let dismissText = currentAutoDismissSeconds <= 0
+            ? "Never"
+            : "\(Self.secondsText(currentAutoDismissSeconds)) s"
+        autoDismissItem.title = "Dismiss After: \(dismissText)"
+
+        updatePresetChecks(
+            blinkPresetItems,
+            current: currentNoBlinkInterval,
+            customItem: blinkCustomItem,
+            includeNever: false
+        )
+        updatePresetChecks(
+            autoDismissPresetItems,
+            current: currentAutoDismissSeconds,
+            customItem: autoDismissCustomItem,
+            includeNever: true
+        )
+    }
+
+    private func updatePresetChecks(
+        _ presets: [(seconds: Double, item: NSMenuItem)],
+        current: Double,
+        customItem: NSMenuItem,
+        includeNever: Bool
+    ) {
+        var matched = false
+        for preset in presets {
+            let on = abs(preset.seconds - current) < 0.0001
+            preset.item.state = on ? .on : .off
+            if on { matched = true }
+        }
+
+        if includeNever {
+            let on = current <= 0
+            autoDismissNeverItem.state = on ? .on : .off
+            if on { matched = true }
+        }
+
+        customItem.state = matched ? .off : .on
+        customItem.title = matched
+            ? "Custom…"
+            : "Custom… (\(Self.secondsText(current)) s)"
+    }
+
+    private func promptForSeconds(
+        title: String,
+        message: String,
+        current: Double,
+        range: ClosedRange<Double>
+    ) -> Double? {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(string: Self.secondsText(current))
+        field.alignment = .right
+        field.frame = NSRect(x: 0, y: 0, width: 160, height: 24)
+
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.minimum = NSNumber(value: range.lowerBound)
+        formatter.maximum = NSNumber(value: range.upperBound)
+        formatter.maximumFractionDigits = 1
+        field.formatter = formatter
+
+        alert.accessoryView = field
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+
+        let value = field.doubleValue
+        guard range.contains(value) else {
+            NSSound.beep()
+            return nil
+        }
+        return value
+    }
+
+    private static func secondsText(_ seconds: Double) -> String {
+        if seconds == seconds.rounded() {
+            return String(Int(seconds))
+        }
+        return String(format: "%.1f", seconds)
     }
 
     // MARK: - State
@@ -115,6 +263,14 @@ final class MenuBarController: NSObject {
         quietHoursItem.isEnabled = snapshot.isRunning
         quietHoursItem.isHidden = false
 
+        currentNoBlinkInterval = snapshot.noBlinkInterval
+        currentAutoDismissSeconds = snapshot.autoDismissSeconds
+        blinkIntervalItem.isHidden = false
+        autoDismissItem.isHidden = false
+        blinkIntervalItem.isEnabled = snapshot.isRunning
+        autoDismissItem.isEnabled = snapshot.isRunning
+        updateIntervalMenus()
+
         statusLineItem.title = statusLine(for: snapshot)
     }
 
@@ -125,10 +281,12 @@ final class MenuBarController: NSObject {
         pauseItem.isEnabled = false
         fallbackItem.isHidden = true
         quietHoursItem.isHidden = true
+        blinkIntervalItem.isHidden = true
+        autoDismissItem.isHidden = true
         retryItem.isHidden = true
     }
 
-    /// A short, unobtrusive attention pulse on the menu bar icon.
+    /// A single, short attention dip on the menu bar icon.
     func pulse() {
         guard let button = statusItem.button else { return }
         button.wantsLayer = true
@@ -136,10 +294,10 @@ final class MenuBarController: NSObject {
 
         let animation = CABasicAnimation(keyPath: "opacity")
         animation.fromValue = 1.0
-        animation.toValue = 0.25
-        animation.duration = 0.22
+        animation.toValue = 0.45
+        animation.duration = 0.18
         animation.autoreverses = true
-        animation.repeatCount = 2
+        animation.repeatCount = 1
         layer.add(animation, forKey: "blinko.pulse")
     }
 
@@ -166,7 +324,12 @@ final class MenuBarController: NSObject {
             return "\(rate) · quiet hours"
         }
         if snapshot.facePresent, let gap = snapshot.secondsSinceBlink {
-            return String(format: "%@ · %.1fs no blink", rate, gap)
+            return String(
+                format: "%@ · %.1fs / %@s no blink",
+                rate,
+                gap,
+                Self.secondsText(snapshot.noBlinkInterval)
+            )
         }
         return rate
     }
@@ -195,6 +358,36 @@ final class MenuBarController: NSObject {
 
     @objc private func toggleQuietHours() {
         onToggleQuietHours?()
+    }
+
+    @objc private func selectBlinkPreset(_ sender: NSMenuItem) {
+        guard let seconds = (sender.representedObject as? NSNumber)?.doubleValue else { return }
+        onSetBlinkInterval?(seconds)
+    }
+
+    @objc private func customBlinkInterval() {
+        guard let value = promptForSeconds(
+            title: "Blink Interval",
+            message: "Show a reminder after this many seconds without a blink. Enter 1–300 seconds.",
+            current: currentNoBlinkInterval,
+            range: 1...300
+        ) else { return }
+        onSetBlinkInterval?(value)
+    }
+
+    @objc private func selectAutoDismissPreset(_ sender: NSMenuItem) {
+        guard let seconds = (sender.representedObject as? NSNumber)?.doubleValue else { return }
+        onSetAutoDismiss?(seconds)
+    }
+
+    @objc private func customAutoDismiss() {
+        guard let value = promptForSeconds(
+            title: "Dismiss After",
+            message: "Hide the reminder card after this many seconds. Enter 0.5–60, or choose Never.",
+            current: max(currentAutoDismissSeconds, 0.5),
+            range: 0.5...60
+        ) else { return }
+        onSetAutoDismiss?(value)
     }
 
     @objc private func retryCamera() {

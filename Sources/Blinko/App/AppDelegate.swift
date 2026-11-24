@@ -91,6 +91,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onTogglePause = { [weak self] in self?.togglePause() }
         menuBar.onToggleFallback = { [weak self] in self?.toggleFallback() }
         menuBar.onToggleQuietHours = { [weak self] in self?.toggleQuietHours() }
+        menuBar.onSetBlinkInterval = { [weak self] seconds in self?.setBlinkInterval(seconds) }
+        menuBar.onSetAutoDismiss = { [weak self] seconds in self?.setAutoDismiss(seconds) }
         menuBar.onRetryCamera = { [weak self] in self?.monitor?.retryCamera() }
         menuBar.onQuit = { NSApp.terminate(nil) }
         self.menuBar = menuBar
@@ -135,6 +137,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         monitor.onBlink = { [weak self] blink in
             self?.debugModel?.record(blink: blink)
+            // A blink means the reminder has done its job: hide it at once
+            // instead of waiting for the auto-dismiss timer.
+            self?.nudgePresenter?.dismiss()
         }
         monitor.onNudge = { [weak self] reason in
             self?.presentNudge(reason: reason)
@@ -153,6 +158,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if monitor.isPaused {
             monitor.resume()
         } else {
+            nudgePresenter?.dismiss()
             monitor.pause()
         }
     }
@@ -167,10 +173,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.setQuietHoursEnabled(!monitor.settings.quietHours.enabled)
     }
 
+    private func setBlinkInterval(_ seconds: Double) {
+        monitor?.setNoBlinkInterval(seconds)
+    }
+
+    private func setAutoDismiss(_ seconds: Double) {
+        monitor?.setAutoDismissSeconds(seconds)
+        // Restart a visible card's pending dismissal with the new duration.
+        nudgePresenter?.setAutoDismissSeconds(seconds)
+    }
+
     private func presentNudge(reason: NudgeReason) {
         nudgePresenter?.present(
             reason: reason,
-            soundEnabled: monitor?.settings.soundEnabled ?? false
+            soundEnabled: monitor?.settings.soundEnabled ?? false,
+            autoDismissSeconds: monitor?.settings.autoDismissSeconds ?? 2.5
         )
         menuBar?.pulse()
 
@@ -225,7 +242,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func previewNudge() {
         nudgePresenter?.present(
             reason: .noBlink,
-            soundEnabled: monitor?.settings.soundEnabled ?? false
+            soundEnabled: monitor?.settings.soundEnabled ?? false,
+            autoDismissSeconds: monitor?.settings.autoDismissSeconds ?? 2.5
         )
         menuBar?.pulse()
     }
@@ -281,6 +299,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.replayURL = url
             self.recordURL = nil
             self.resumeMonitoringAfterReplay = self.monitor != nil
+            self.nudgePresenter?.dismiss()
             self.monitor?.stop()
             self.monitor = nil
             self.menuBar?.showReplayMode()

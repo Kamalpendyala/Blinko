@@ -131,12 +131,10 @@ final class NudgePanel: NSPanel {
         orderFrontRegardless()
 
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.18
+            context.duration = 0.15
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
             animator().alphaValue = 1
         }
-
-        pulseIcon()
     }
 
     func hide() {
@@ -144,7 +142,7 @@ final class NudgePanel: NSPanel {
 
         let generation = showGeneration
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.25
+            context.duration = 0.35
             animator().alphaValue = 0
         } completionHandler: { [weak self] in
             guard let self, self.showGeneration == generation else { return }
@@ -153,20 +151,8 @@ final class NudgePanel: NSPanel {
     }
 
     private func apply(accent: NSColor) {
-        card.layer?.borderColor = accent.withAlphaComponent(0.85).cgColor
+        card.layer?.borderColor = accent.withAlphaComponent(0.5).cgColor
         iconBackground.layer?.backgroundColor = accent.withAlphaComponent(0.18).cgColor
         iconView.contentTintColor = accent
-    }
-
-    private func pulseIcon() {
-        iconView.wantsLayer = true
-        let pulse = CABasicAnimation(keyPath: "transform.scale")
-        pulse.fromValue = 1.0
-        pulse.toValue = 1.16
-        pulse.duration = 0.32
-        pulse.autoreverses = true
-        pulse.repeatCount = 2
-        pulse.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-        iconView.layer?.add(pulse, forKey: "blinko.icon.pulse")
     }
 }

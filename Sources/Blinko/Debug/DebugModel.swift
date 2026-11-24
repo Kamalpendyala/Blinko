@@ -37,6 +37,7 @@ final class DebugModel: ObservableObject {
     @Published private(set) var monitorStatus = ""
     @Published private(set) var secondsSinceBlink: Double?
     @Published private(set) var noBlinkInterval: Double = 5
+    @Published private(set) var autoDismissSeconds: Double = 2.5
     @Published private(set) var facePresent = false
     @Published private(set) var quietHoursActive = false
 
@@ -123,6 +124,7 @@ final class DebugModel: ObservableObject {
         monitorStatus = monitor.status
         secondsSinceBlink = monitor.secondsSinceBlink
         noBlinkInterval = monitor.noBlinkInterval
+        autoDismissSeconds = monitor.autoDismissSeconds
         facePresent = monitor.facePresent
         quietHoursActive = monitor.quietHoursActive
     }
@@ -139,6 +141,7 @@ final class DebugModel: ObservableObject {
         secondsSinceBlink = nil
         facePresent = false
         quietHoursActive = false
+        autoDismissSeconds = 2.5
     }
 
     func resetCounters() {

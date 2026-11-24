@@ -39,6 +39,8 @@ public struct Settings: Codable, Equatable {
     /// Seconds without a blink before a reminder fires. Re-arms while blinking
     /// stays absent, so the reminder repeats at this cadence.
     public var noBlinkInterval: Double
+    /// How long the reminder card stays visible. Zero means "until a blink".
+    public var autoDismissSeconds: Double
     public var quietHours: QuietHours
     public var fallbackRemindersEnabled: Bool
     public var soundEnabled: Bool
@@ -48,6 +50,7 @@ public struct Settings: Codable, Equatable {
         burstSeconds: Double = 12,
         intervalSeconds: Double = 60,
         noBlinkInterval: Double = 5,
+        autoDismissSeconds: Double = 2.5,
         // Off for the current tuning build; the menu bar can turn it back on.
         quietHours: QuietHours = QuietHours(enabled: false),
         fallbackRemindersEnabled: Bool = false,
@@ -57,6 +60,7 @@ public struct Settings: Codable, Equatable {
         self.burstSeconds = burstSeconds
         self.intervalSeconds = intervalSeconds
         self.noBlinkInterval = noBlinkInterval
+        self.autoDismissSeconds = autoDismissSeconds
         self.quietHours = quietHours
         self.fallbackRemindersEnabled = fallbackRemindersEnabled
         self.soundEnabled = soundEnabled

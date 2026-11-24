@@ -21,6 +21,7 @@ struct DebugView: View {
                 metric("Rate", rate(model.smoothedRate))
                 metric("Last burst", rate(model.lastBurstRate))
                 metric("No blink", noBlink())
+                metric("Dismiss", dismissText())
                 metric("Nudges", "\(model.nudgeCount)", emphasized: true)
                 Spacer()
                 if model.quietHoursActive {
@@ -130,7 +131,17 @@ struct DebugView: View {
 
     private func noBlink() -> String {
         guard model.facePresent, let gap = model.secondsSinceBlink else { return "—" }
-        return String(format: "%.1f / %.0fs", gap, model.noBlinkInterval)
+        return String(format: "%.1f / %@s", gap, secondsText(model.noBlinkInterval))
+    }
+
+    private func dismissText() -> String {
+        model.autoDismissSeconds <= 0
+            ? "Never"
+            : "\(secondsText(model.autoDismissSeconds))s"
+    }
+
+    private func secondsText(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
     }
 }
 

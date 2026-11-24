@@ -13,6 +13,7 @@ struct MonitorSnapshot: Equatable {
     var facePresent: Bool
     var secondsSinceBlink: Double?
     var noBlinkInterval: Double
+    var autoDismissSeconds: Double
     var smoothedRate: Double?
     var lastBurstRate: Double?
     var lowStreak: Int
@@ -184,6 +185,23 @@ final class BlinkMonitor {
             // Do not fire immediately when quiet hours switch on.
             gapPolicy.start(at: clock.monotonicNow)
         }
+        publish()
+    }
+
+    /// Updates the no-blink interval and re-arms the watchdog immediately.
+    func setNoBlinkInterval(_ seconds: Double) {
+        assert(Thread.isMainThread)
+        guard seconds > 0 else { return }
+        settings.noBlinkInterval = seconds
+        gapPolicy.setInterval(seconds, at: clock.monotonicNow)
+        publish()
+    }
+
+    /// Updates the card's auto-dismiss duration. Zero means "until a blink".
+    func setAutoDismissSeconds(_ seconds: Double) {
+        assert(Thread.isMainThread)
+        guard seconds >= 0 else { return }
+        settings.autoDismissSeconds = seconds
         publish()
     }
 
@@ -374,6 +392,7 @@ final class BlinkMonitor {
             facePresent: lastValidFaceAt.map { now - $0 <= 2 } ?? false,
             secondsSinceBlink: gapPolicy.secondsSinceBlink(at: now),
             noBlinkInterval: settings.noBlinkInterval,
+            autoDismissSeconds: settings.autoDismissSeconds,
             smoothedRate: rateEstimator.smoothedRate,
             lastBurstRate: rateEstimator.lastBurstRate,
             lowStreak: nudgePolicy.lowStreak,

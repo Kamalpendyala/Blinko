@@ -70,4 +70,20 @@ struct BlinkGapPolicyTests {
         #expect(policy.nudgeCount == 0)
         #expect(policy.evaluate(now: 10, facePresent: true) == .none)
     }
+
+    @Test("GAP-07 changing the interval re-arms from the last blink")
+    func gap07IntervalChange() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+        policy.recordBlink(at: 10)
+
+        // The old 5 s interval would fire at 15; the new 20 s one waits until 30.
+        policy.setInterval(20, at: 12)
+        #expect(policy.evaluate(now: 29.9, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 30, facePresent: true) == .nudge(.noBlink))
+
+        // Lowering the interval takes effect immediately.
+        policy.setInterval(3, at: 31)
+        #expect(policy.evaluate(now: 33, facePresent: true) == .nudge(.noBlink))
+    }
 }

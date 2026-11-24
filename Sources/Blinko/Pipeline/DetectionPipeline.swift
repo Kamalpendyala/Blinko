@@ -48,16 +48,24 @@ final class DetectionPipeline {
     // MARK: - Lifecycle
 
     func startCamera() {
-        stop()
+        stopReplay()
 
-        let camera = CameraFrameSource()
-        camera.onError = { [weak self] error in
-            self?.publish(error)
+        let camera: CameraFrameSource
+        if let existing = self.camera {
+            // Reuse the configured AVCaptureSession across duty-cycle bursts:
+            // `stopCamera()` stopped it, so the indicator is dark in between.
+            camera = existing
+        } else {
+            let created = CameraFrameSource()
+            created.onError = { [weak self] error in
+                self?.publish(error)
+            }
+            created.onFrame = { [weak self] frame in
+                self?.enqueue(frame)
+            }
+            self.camera = created
+            camera = created
         }
-        camera.onFrame = { [weak self] frame in
-            self?.enqueue(frame)
-        }
-        self.camera = camera
 
         do {
             try camera.start()
@@ -66,8 +74,29 @@ final class DetectionPipeline {
         }
     }
 
+    /// Stops capture but keeps the configured session for the next burst.
+    func stopCamera() {
+        camera?.stop()
+        busyLock.lock()
+        busy = false
+        busyLock.unlock()
+    }
+
+    /// Drops the configured session so the next burst reconfigures the camera.
+    /// Used after a device-level failure (unplugged/unavailable camera).
+    func resetCamera() {
+        stopCamera()
+        camera = nil
+    }
+
+    private func stopReplay() {
+        replay?.stop()
+        replay = nil
+    }
+
     func startReplay(url: URL, pace: Bool = true) {
-        stop()
+        stopCamera()
+        stopReplay()
 
         do {
             let replay = try ReplayFrameSource(contentsOf: url, pace: pace)
@@ -92,18 +121,15 @@ final class DetectionPipeline {
         }
     }
 
+    /// Stops all sources but keeps the camera session configured for reuse.
     func stop() {
-        camera?.stop()
-        camera = nil
-        replay?.stop()
-        replay = nil
-        busyLock.lock()
-        busy = false
-        busyLock.unlock()
+        stopCamera()
+        stopReplay()
     }
 
     func shutdown() {
         stop()
+        camera = nil
         recorder?.close()
     }
 

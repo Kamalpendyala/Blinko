@@ -93,6 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onToggleQuietHours = { [weak self] in self?.toggleQuietHours() }
         menuBar.onSetBlinkInterval = { [weak self] seconds in self?.setBlinkInterval(seconds) }
         menuBar.onSetAutoDismiss = { [weak self] seconds in self?.setAutoDismiss(seconds) }
+        menuBar.onSetDutyCycle = { [weak self] burst, interval in
+            self?.monitor?.setDutyCycle(burstSeconds: burst, intervalSeconds: interval)
+        }
+        menuBar.onSampleNow = { [weak self] in self?.monitor?.sampleNow() }
         menuBar.onRetryCamera = { [weak self] in self?.monitor?.retryCamera() }
         menuBar.onQuit = { NSApp.terminate(nil) }
         self.menuBar = menuBar
@@ -147,6 +151,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onError = { [weak self] error in
             self?.debugModel?.setStatus(error.description)
             self?.log("camera error: \(error.description)")
+        }
+        monitor.onSystemSuspend = { [weak self] in
+            self?.nudgePresenter?.dismiss()
         }
         self.monitor = monitor
 
@@ -222,9 +229,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if debugWindow == nil {
-            let controller = DebugWindowController(model: model) { [weak self] in
-                self?.previewNudge()
-            }
+            let controller = DebugWindowController(
+                model: model,
+                onPreviewNudge: { [weak self] in self?.previewNudge() },
+                onSampleNow: { [weak self] in self?.monitor?.sampleNow() }
+            )
             controller.onClose = { [weak self] in
                 guard let self else { return }
                 self.debugModel?.stop()

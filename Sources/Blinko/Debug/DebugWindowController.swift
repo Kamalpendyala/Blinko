@@ -4,7 +4,11 @@ import SwiftUI
 final class DebugWindowController: NSWindowController, NSWindowDelegate {
     var onClose: (() -> Void)?
 
-    init(model: DebugModel, onPreviewNudge: @escaping () -> Void) {
+    init(
+        model: DebugModel,
+        onPreviewNudge: @escaping () -> Void,
+        onSampleNow: @escaping () -> Void
+    ) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 820, height: 500),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -15,7 +19,11 @@ final class DebugWindowController: NSWindowController, NSWindowDelegate {
         window.center()
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(
-            rootView: DebugView(model: model, onPreviewNudge: onPreviewNudge)
+            rootView: DebugView(
+                model: model,
+                onPreviewNudge: onPreviewNudge,
+                onSampleNow: onSampleNow
+            )
         )
         super.init(window: window)
         window.delegate = self

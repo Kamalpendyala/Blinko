@@ -4,6 +4,7 @@ import BlinkoCore
 struct DebugView: View {
     @ObservedObject var model: DebugModel
     let onPreviewNudge: () -> Void
+    let onSampleNow: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -34,6 +35,22 @@ struct DebugView: View {
                         .font(.caption.bold())
                         .foregroundStyle(.orange)
                 }
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 26) {
+                metric("Sampling", samplingText())
+                metric("Duty", dutyText())
+                if let reason = model.suppression.shortDescription {
+                    Text("CAMERA OFF — \(reason.uppercased())")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Button("Sample Now") {
+                    onSampleNow()
+                }
+                .controlSize(.small)
+                .disabled(model.isPaused)
                 Button("Preview Nudge") {
                     onPreviewNudge()
                 }
@@ -77,7 +94,7 @@ struct DebugView: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Text("Camera stays on while monitoring is active (Phase C adds duty cycling). Frames are processed in memory and never written to disk.")
+            Text("Camera runs only during short bursts (12 s every 60 s by default) and is fully stopped in between. Frames are processed in memory and never written to disk.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -138,6 +155,25 @@ struct DebugView: View {
         model.autoDismissSeconds <= 0
             ? "Never"
             : "\(secondsText(model.autoDismissSeconds))s"
+    }
+
+    private func samplingText() -> String {
+        if model.isBursting, let elapsed = model.burstElapsed {
+            return String(
+                format: "on %.1f/%@s",
+                elapsed,
+                secondsText(model.burstSeconds)
+            )
+        }
+        if model.isBursting { return "on" }
+        if let remaining = model.secondsUntilNextBurst {
+            return String(format: "off %.0fs", remaining.rounded(.up))
+        }
+        return "off"
+    }
+
+    private func dutyText() -> String {
+        "\(secondsText(model.burstSeconds))s / \(secondsText(model.intervalSeconds))s"
     }
 
     private func secondsText(_ value: Double) -> String {

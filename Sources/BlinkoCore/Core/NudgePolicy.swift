@@ -19,6 +19,7 @@ public struct NudgeSuppression: OptionSet, Equatable {
     public static let lowBattery = NudgeSuppression(rawValue: 1 << 6)
     public static let userIdle = NudgeSuppression(rawValue: 1 << 7)
     public static let screenLocked = NudgeSuppression(rawValue: 1 << 8)
+    public static let asleep = NudgeSuppression(rawValue: 1 << 9)
 }
 
 public enum NudgeReason: Equatable {

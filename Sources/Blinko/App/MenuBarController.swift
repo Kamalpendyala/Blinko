@@ -10,6 +10,8 @@ final class MenuBarController: NSObject {
     var onToggleQuietHours: (() -> Void)?
     var onSetBlinkInterval: ((Double) -> Void)?
     var onSetAutoDismiss: ((Double) -> Void)?
+    var onSetDutyCycle: ((Double, Double) -> Void)?
+    var onSampleNow: (() -> Void)?
     var onRetryCamera: (() -> Void)?
     var onQuit: (() -> Void)?
 
@@ -20,14 +22,20 @@ final class MenuBarController: NSObject {
     private let quietHoursItem: NSMenuItem
     private let blinkIntervalItem = NSMenuItem(title: "Blink Interval", action: nil, keyEquivalent: "")
     private let autoDismissItem = NSMenuItem(title: "Dismiss After", action: nil, keyEquivalent: "")
+    private let samplingItem = NSMenuItem(title: "Sampling", action: nil, keyEquivalent: "")
+    private let sampleNowItem = NSMenuItem(title: "Sample Now", action: nil, keyEquivalent: "s")
     private let retryItem: NSMenuItem
     private var blinkPresetItems: [(seconds: Double, item: NSMenuItem)] = []
     private var autoDismissPresetItems: [(seconds: Double, item: NSMenuItem)] = []
+    private var dutyPresetItems: [(burst: Double, interval: Double, item: NSMenuItem)] = []
     private let blinkCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
     private let autoDismissCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
     private let autoDismissNeverItem = NSMenuItem(title: "Never", action: nil, keyEquivalent: "")
     private var currentNoBlinkInterval: Double = 5
     private var currentAutoDismissSeconds: Double = 2.5
+    private var currentBurstSeconds: Double = 12
+    private var currentIntervalSeconds: Double = 60
+    private var lastSnapshot: MonitorSnapshot?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -57,11 +65,16 @@ final class MenuBarController: NSObject {
         quietHoursItem.target = self
         quietHoursItem.action = #selector(toggleQuietHours)
 
+        sampleNowItem.target = self
+        sampleNowItem.action = #selector(sampleNow)
+        sampleNowItem.isHidden = true
+
         retryItem.target = self
         retryItem.action = #selector(retryCamera)
         retryItem.isHidden = true
 
         configureIntervalMenus()
+        configureDutyMenu()
 
         let debugItem = NSMenuItem(
             title: "Show Detection Debug…",
@@ -97,10 +110,12 @@ final class MenuBarController: NSObject {
         menu.addItem(pauseItem)
         menu.addItem(fallbackItem)
         menu.addItem(quietHoursItem)
+        menu.addItem(sampleNowItem)
         menu.addItem(retryItem)
         menu.addItem(.separator())
         menu.addItem(blinkIntervalItem)
         menu.addItem(autoDismissItem)
+        menu.addItem(samplingItem)
         menu.addItem(.separator())
         menu.addItem(debugItem)
         menu.addItem(replayItem)
@@ -109,6 +124,7 @@ final class MenuBarController: NSObject {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+        menu.delegate = self
     }
 
     // MARK: - Interval menus
@@ -155,12 +171,41 @@ final class MenuBarController: NSObject {
         autoDismissItem.submenu = dismissMenu
     }
 
+    private static let dutyPresets: [(burst: Double, interval: Double)] = [
+        (8, 40),
+        (12, 60),
+        (20, 120),
+        (30, 300),
+    ]
+
+    private func configureDutyMenu() {
+        let dutyMenu = NSMenu()
+        for (index, preset) in Self.dutyPresets.enumerated() {
+            let item = NSMenuItem(
+                title: "\(Self.secondsText(preset.burst)) s every \(Self.secondsText(preset.interval)) s",
+                action: #selector(selectDutyPreset(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.tag = index
+            dutyMenu.addItem(item)
+            dutyPresetItems.append((preset.burst, preset.interval, item))
+        }
+        samplingItem.submenu = dutyMenu
+    }
+
     private func updateIntervalMenus() {
         blinkIntervalItem.title = "Blink Interval: \(Self.secondsText(currentNoBlinkInterval)) s"
         let dismissText = currentAutoDismissSeconds <= 0
             ? "Never"
             : "\(Self.secondsText(currentAutoDismissSeconds)) s"
         autoDismissItem.title = "Dismiss After: \(dismissText)"
+        samplingItem.title = "Sampling: \(Self.secondsText(currentBurstSeconds)) s / \(Self.secondsText(currentIntervalSeconds)) s"
+        for preset in dutyPresetItems {
+            let on = abs(preset.burst - currentBurstSeconds) < 0.0001
+                && abs(preset.interval - currentIntervalSeconds) < 0.0001
+            preset.item.state = on ? .on : .off
+        }
 
         updatePresetChecks(
             blinkPresetItems,
@@ -246,6 +291,7 @@ final class MenuBarController: NSObject {
     // MARK: - State
 
     func update(snapshot: MonitorSnapshot) {
+        lastSnapshot = snapshot
         let active = snapshot.isRunning && !snapshot.isPaused && !snapshot.cameraDenied
         setIcon(active ? "eye" : "eye.slash", toolTip: snapshot.status)
 
@@ -263,10 +309,16 @@ final class MenuBarController: NSObject {
         quietHoursItem.isEnabled = snapshot.isRunning
         quietHoursItem.isHidden = false
 
+        sampleNowItem.isHidden = !snapshot.isRunning
+        sampleNowItem.isEnabled = active && !snapshot.isBursting
+
         currentNoBlinkInterval = snapshot.noBlinkInterval
         currentAutoDismissSeconds = snapshot.autoDismissSeconds
+        currentBurstSeconds = snapshot.burstSeconds
+        currentIntervalSeconds = snapshot.intervalSeconds
         blinkIntervalItem.isHidden = false
         autoDismissItem.isHidden = false
+        samplingItem.isHidden = false
         blinkIntervalItem.isEnabled = snapshot.isRunning
         autoDismissItem.isEnabled = snapshot.isRunning
         updateIntervalMenus()
@@ -281,8 +333,10 @@ final class MenuBarController: NSObject {
         pauseItem.isEnabled = false
         fallbackItem.isHidden = true
         quietHoursItem.isHidden = true
+        sampleNowItem.isHidden = true
         blinkIntervalItem.isHidden = true
         autoDismissItem.isHidden = true
+        samplingItem.isHidden = true
         retryItem.isHidden = true
     }
 
@@ -320,8 +374,15 @@ final class MenuBarController: NSObject {
         let rate = snapshot.smoothedRate.map { String(format: "%.1f blinks/min", $0) }
             ?? "Measuring…"
 
-        if snapshot.quietHoursActive {
-            return "\(rate) · quiet hours"
+        if let reason = snapshot.suppression.shortDescription, !snapshot.isBursting {
+            return "Camera off — \(reason)"
+        }
+        if snapshot.isBursting {
+            return "\(rate) · sampling now"
+        }
+        if let next = snapshot.nextBurstAt {
+            let remaining = max(0, next - ProcessInfo.processInfo.systemUptime)
+            return "\(rate) · camera off, next in \(Int(remaining.rounded(.up)))s"
         }
         if snapshot.facePresent, let gap = snapshot.secondsSinceBlink {
             return String(
@@ -390,11 +451,31 @@ final class MenuBarController: NSObject {
         onSetAutoDismiss?(value)
     }
 
+    @objc private func selectDutyPreset(_ sender: NSMenuItem) {
+        let presets = Self.dutyPresets
+        guard presets.indices.contains(sender.tag) else { return }
+        let preset = presets[sender.tag]
+        onSetDutyCycle?(preset.burst, preset.interval)
+    }
+
     @objc private func retryCamera() {
         onRetryCamera?()
     }
 
+    @objc private func sampleNow() {
+        onSampleNow?()
+    }
+
     @objc private func quit() {
         onQuit?()
+    }
+}
+
+extension MenuBarController: NSMenuDelegate {
+    /// Recomputes the countdown when the user opens the menu; no timer runs
+    /// between bursts just to keep the menu title fresh.
+    func menuWillOpen(_ menu: NSMenu) {
+        guard let lastSnapshot else { return }
+        statusLineItem.title = statusLine(for: lastSnapshot)
     }
 }

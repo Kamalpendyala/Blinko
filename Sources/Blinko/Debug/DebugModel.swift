@@ -41,6 +41,17 @@ final class DebugModel: ObservableObject {
     @Published private(set) var facePresent = false
     @Published private(set) var quietHoursActive = false
 
+    // Phase C: duty-cycle readouts.
+    @Published private(set) var isBursting = false
+    @Published private(set) var burstSeconds: Double = 12
+    @Published private(set) var intervalSeconds: Double = 60
+    @Published private(set) var secondsUntilNextBurst: Double?
+    @Published private(set) var burstElapsed: Double?
+    @Published private(set) var suppression: NudgeSuppression = []
+
+    private let clock: Clock
+    private var nextBurstAt: TimeInterval?
+    private var burstEndsAt: TimeInterval?
     private var pending: [PlotSample] = []
     private var nextID = 0
     private var validCount = 0
@@ -48,6 +59,10 @@ final class DebugModel: ObservableObject {
     private var flushTimer: Timer?
 
     // MARK: - Lifecycle
+
+    init(clock: Clock = SystemClock()) {
+        self.clock = clock
+    }
 
     func start() {
         assert(Thread.isMainThread)
@@ -127,6 +142,13 @@ final class DebugModel: ObservableObject {
         autoDismissSeconds = monitor.autoDismissSeconds
         facePresent = monitor.facePresent
         quietHoursActive = monitor.quietHoursActive
+        isBursting = monitor.isBursting
+        burstSeconds = monitor.burstSeconds
+        intervalSeconds = monitor.intervalSeconds
+        nextBurstAt = monitor.nextBurstAt
+        burstEndsAt = monitor.burstEndsAt
+        suppression = monitor.suppression
+        refreshCountdown()
     }
 
     /// Drops live-monitor fields when switching to replay/diagnostic mode.
@@ -142,6 +164,12 @@ final class DebugModel: ObservableObject {
         facePresent = false
         quietHoursActive = false
         autoDismissSeconds = 2.5
+        isBursting = false
+        secondsUntilNextBurst = nil
+        burstElapsed = nil
+        suppression = []
+        nextBurstAt = nil
+        burstEndsAt = nil
     }
 
     func resetCounters() {
@@ -159,6 +187,9 @@ final class DebugModel: ObservableObject {
 
     private func flush() {
         assert(Thread.isMainThread)
+        // The debug window's 15 Hz flush also drives the between-burst
+        // countdown; no samples arrive while the camera is off.
+        refreshCountdown()
         guard !pending.isEmpty else { return }
 
         samples.append(contentsOf: pending)
@@ -172,5 +203,22 @@ final class DebugModel: ObservableObject {
 
         let valid = samples.lazy.filter(\.valid).count
         validFraction = samples.isEmpty ? 0 : Double(valid) / Double(samples.count)
+    }
+
+    /// Converts the monitor's monotonic deadlines into display values. Only
+    /// runs while the debug window is open; the menu bar app itself has no
+    /// per-second timer between bursts.
+    private func refreshCountdown() {
+        let now = clock.monotonicNow
+        if let nextBurstAt {
+            secondsUntilNextBurst = max(0, nextBurstAt - now)
+        } else {
+            secondsUntilNextBurst = nil
+        }
+        if let burstEndsAt {
+            burstElapsed = max(0, burstSeconds - max(0, burstEndsAt - now))
+        } else {
+            burstElapsed = nil
+        }
     }
 }

@@ -41,6 +41,10 @@ public struct Settings: Codable, Equatable {
     public var noBlinkInterval: Double
     /// How long the reminder card stays visible. Zero means "until a blink".
     public var autoDismissSeconds: Double
+    /// Skip sampling bursts after this many seconds without keyboard/mouse input.
+    public var idleThresholdSeconds: Double
+    /// Skip bursts below this battery fraction while unplugged.
+    public var lowBatteryThreshold: Double
     public var quietHours: QuietHours
     public var fallbackRemindersEnabled: Bool
     public var soundEnabled: Bool
@@ -51,6 +55,8 @@ public struct Settings: Codable, Equatable {
         intervalSeconds: Double = 60,
         noBlinkInterval: Double = 5,
         autoDismissSeconds: Double = 2.5,
+        idleThresholdSeconds: Double = 5 * 60,
+        lowBatteryThreshold: Double = 0.20,
         // Off for the current tuning build; the menu bar can turn it back on.
         quietHours: QuietHours = QuietHours(enabled: false),
         fallbackRemindersEnabled: Bool = false,
@@ -61,6 +67,8 @@ public struct Settings: Codable, Equatable {
         self.intervalSeconds = intervalSeconds
         self.noBlinkInterval = noBlinkInterval
         self.autoDismissSeconds = autoDismissSeconds
+        self.idleThresholdSeconds = idleThresholdSeconds
+        self.lowBatteryThreshold = lowBatteryThreshold
         self.quietHours = quietHours
         self.fallbackRemindersEnabled = fallbackRemindersEnabled
         self.soundEnabled = soundEnabled

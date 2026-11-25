@@ -3,6 +3,8 @@ import BlinkoCore
 
 struct DebugView: View {
     @ObservedObject var model: DebugModel
+    let onPreviewNudge: () -> Void
+    let onSampleNow: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -14,6 +16,45 @@ struct DebugView: View {
                 metric("Open >", number(model.openThreshold))
                 metric("Valid face", percent(model.validFraction))
                 Spacer()
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 26) {
+                metric("Rate", rate(model.smoothedRate))
+                metric("Last burst", rate(model.lastBurstRate))
+                metric("No blink", noBlink())
+                metric("Dismiss", dismissText())
+                metric("Nudges", "\(model.nudgeCount)", emphasized: true)
+                Spacer()
+                if model.quietHoursActive {
+                    Text("QUIET HOURS")
+                        .font(.caption.bold())
+                        .foregroundStyle(.blue)
+                }
+                if model.isPaused {
+                    Text("PAUSED")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            HStack(alignment: .firstTextBaseline, spacing: 26) {
+                metric("Sampling", samplingText())
+                metric("Duty", dutyText())
+                if let reason = model.suppression.shortDescription {
+                    Text("CAMERA OFF — \(reason.uppercased())")
+                        .font(.caption.bold())
+                        .foregroundStyle(.orange)
+                }
+                Spacer()
+                Button("Sample Now") {
+                    onSampleNow()
+                }
+                .controlSize(.small)
+                .disabled(model.isPaused)
+                Button("Preview Nudge") {
+                    onPreviewNudge()
+                }
+                .controlSize(.small)
             }
 
             SparklineView(
@@ -38,7 +79,7 @@ struct DebugView: View {
             }
 
             HStack(alignment: .top) {
-                Text(model.status)
+                Text(model.monitorStatus.isEmpty ? model.status : model.monitorStatus)
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -53,7 +94,7 @@ struct DebugView: View {
                     .foregroundStyle(.tertiary)
             }
 
-            Text("Camera indicator stays on while this window is open. Frames are processed in memory and never written to disk.")
+            Text("Camera runs only during short bursts (12 s every 60 s by default) and is fully stopped in between. Frames are processed in memory and never written to disk.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
@@ -96,8 +137,47 @@ struct DebugView: View {
         return String(format: "%.3f", value)
     }
 
+    private func rate(_ value: Double?) -> String {
+        guard let value else { return "—" }
+        return String(format: "%.1f/min", value)
+    }
+
     private func percent(_ value: Double) -> String {
         "\(Int((value * 100).rounded()))%"
+    }
+
+    private func noBlink() -> String {
+        guard model.facePresent, let gap = model.secondsSinceBlink else { return "—" }
+        return String(format: "%.1f / %@s", gap, secondsText(model.noBlinkInterval))
+    }
+
+    private func dismissText() -> String {
+        model.autoDismissSeconds <= 0
+            ? "Never"
+            : "\(secondsText(model.autoDismissSeconds))s"
+    }
+
+    private func samplingText() -> String {
+        if model.isBursting, let elapsed = model.burstElapsed {
+            return String(
+                format: "on %.1f/%@s",
+                elapsed,
+                secondsText(model.burstSeconds)
+            )
+        }
+        if model.isBursting { return "on" }
+        if let remaining = model.secondsUntilNextBurst {
+            return String(format: "off %.0fs", remaining.rounded(.up))
+        }
+        return "off"
+    }
+
+    private func dutyText() -> String {
+        "\(secondsText(model.burstSeconds))s / \(secondsText(model.intervalSeconds))s"
+    }
+
+    private func secondsText(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
     }
 }
 

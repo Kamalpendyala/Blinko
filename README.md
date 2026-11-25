@@ -4,20 +4,51 @@ Working name: **Blinko**. Native Swift menu bar app that watches blink rate
 through the webcam and will nudge the user to blink. Local-first, sandboxed, no
 networking code.
 
-**Current status: Phase 0 (bootstrap) + Phase A (detection prototype) complete.**
-The reminder logic (Phase B) is not built yet — this is the detection harness.
+**Current status: Phase 0 (bootstrap) + Phase A (detection prototype) + Phase B
+(reminders) + Phase C (scheduling & power) implemented.** The camera now runs in
+short bursts — 12 s every 60 s by default — and is fully stopped in between, so
+the camera indicator is dark most of the time. The reminder trigger is a 5 s
+no-blink watchdog inside each burst; the rate estimator remains as a diagnostic.
+Phase C is awaiting review and the manual camera-light/CPU checks in §“Phase C
+acceptance status”.
 
 ---
 
 ## What works today
 
 - Camera → Vision landmarks → eye-openness ratio → blink state machine.
+- Duty-cycled capture: one 12 s burst every 60 s by default, with the
+  `AVCaptureSession` fully stopped between bursts. The cadence uses absolute
+  monotonic deadlines and one tolerant timer; no per-second polling runs while
+  the camera is off.
+- Bursts are skipped while the screen is locked/asleep, the system is asleep,
+  the user is idle (5 min), the battery is below 20 % and unplugged, Blinko is
+  paused, quiet hours are active, or camera access is denied. A `ProcessInfo`
+  activity assertion is held only for the duration of a burst.
+- `BlinkGapPolicy`: if no blink is detected for 5 s while a face is visible, a
+  reminder fires and repeats every 5 s until a blink resets the timer.
+- `RateEstimator`: blinks per minute over valid-face seconds only, EMA-smoothed
+  across 12 s bursts; bursts with under 3 s of valid face are discarded. Shown
+  in the debug window as a diagnostic.
+- Prominent non-activating reminder card centered on the active screen: large
+  icon, bold title, accent border, never steals focus, clicks pass through,
+  fades in/out gently, and hides as soon as a blink is detected (or after the
+  configured auto-dismiss duration, default 2.5 s).
+- **Blink Interval** and **Dismiss After** menu-bar submenus with presets plus
+  a **Custom…** numeric field, so both timers can be changed without restarting.
+- One-click **Pause Blinko / Resume Blinko**; nothing fires while paused.
+- **Quiet Hours (22:00–08:00)** menu toggle. Off by default in this tuning
+  build so the 5 s reminder is easy to observe.
+- Camera-denied fallback: optional fixed 20 min reminders (20-20-20 style).
 - Debug window with live openness trace, baseline/threshold lines, blink count,
-  valid-face percentage and detector phase.
+  valid-face percentage, smoothed rate, seconds since the last blink, nudge
+  count, sampling countdown, current suppression reason, **Sample Now** and
+  **Preview Nudge** buttons.
 - Replay harness that runs a recorded landmark CSV through the same pipeline.
 - Debug-only landmark CSV recorder (derived eye points only — never pixels).
 - Menu bar item (`LSUIElement`), no Dock icon, sandboxed with camera access.
-- 21 unit tests covering EM-01…05, BD-01…10, CSV round-trip and the clock seam.
+- 67 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…07, GAP-01…07,
+  SC-01…09, QH-01…05, Settings round-trips, CSV round-trip and the clock seam.
 
 ## Requirements
 
@@ -35,6 +66,7 @@ not installed on this machine). `Package.swift` opens directly in Xcode:
 ```sh
 ./Scripts/test.sh        # swift test
 ./Scripts/build-app.sh   # builds build/Blinko.app, ad-hoc signed
+./Scripts/measure-app.sh 3600 10  # sample a running app for RSS/CPU numbers
 ```
 
 The build script assembles the `.app` bundle (Info.plist + entitlements) and
@@ -48,13 +80,16 @@ CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./Scripts/build-app.sh
 ## Run
 
 ```sh
-# Camera + debug window (unsandboxed development build)
+# Menu bar app: starts monitoring and may nudge (unsandboxed development build)
+swift run Blinko
+
+# Same, plus the live detection debug window
 swift run Blinko --debug
 
 # Built app, camera + debug window
 open build/Blinko.app --args --debug
 
-# Replay a recorded landmark session (unsandboxed, relative paths OK)
+# Replay a recorded landmark session (no camera, no reminders)
 swift run Blinko --replay Fixtures/synthetic_session.csv
 
 # Headless replay smoke test: prints a summary and exits
@@ -62,12 +97,28 @@ swift run Blinko --replay Fixtures/synthetic_session.csv --exit-after-replay
 # [replay] frames=600 blinks=3 baseline=0.300
 ```
 
+The menu bar menu contains:
+
+- **Pause Blinko / Resume Blinko** — one click; the camera stops and no nudges
+  or fallback reminders fire while paused.
+- **Enable / Disable Timed Reminders** — shown when the camera is unavailable.
+- **Quiet Hours (22:00–08:00)** — checkmark toggle; suppresses reminders when on.
+- **Blink Interval: N s** — presets 3/5/10/15/20/30 s plus **Custom…** (1–300 s).
+- **Dismiss After: N s** — presets 1/2.5/5/10 s, **Never**, plus **Custom…** (0.5–60 s).
+- **Sampling: N s / M s** — burst length / cadence presets: 8/40, 12/60
+  (default), 20/120 and 30/300 s.
+- **Sample Now** — start an out-of-band burst without waiting for the cadence.
+- **Retry Camera** — shown when camera access was denied.
+- **Show Detection Debug…** — live trace, rate and policy state.
+- **Replay Recorded Session…** and **Record Landmark Session…**.
+- **Quit Blinko**.
+
 The built `.app` is sandboxed, so it **cannot read arbitrary paths from the
 command line**. Use the menu bar items instead:
 
 - **Replay Recorded Session…** — choose a CSV via `NSOpenPanel`.
 - **Record Landmark Session…** — choose where to write a CSV via `NSSavePanel`.
-- **Show Detection Debug…** — start the camera pipeline.
+- **Show Detection Debug…** — open the live debug window.
 
 `--replay` still works in the sandboxed app for files inside its own container
 (`~/Library/Containers/com.local.blinko/Data/`).
@@ -80,10 +131,21 @@ command line**. Use the menu bar items instead:
 - Green dashed: open threshold (`baseline × 0.80`).
 - Red ticks at the top: detected blinks.
 - Header: blink count, latest openness, baseline, thresholds, valid-face share.
-- Closing the window stops capture, so the camera indicator goes dark.
+- Second row: smoothed rate, last burst rate, seconds since the last blink
+  (`gap / interval`), auto-dismiss duration, nudge count.
+- Third row: sampling state (`on 4.2/12s` or `off 37s`), configured duty cycle
+  (`12s / 60s`), and a `CAMERA OFF — <reason>` badge when a gate is blocking
+  bursts.
+- **Sample Now** starts a burst immediately; **Preview Nudge** shows the
+  centered reminder card without touching policy state.
 
 Baseline is estimated automatically from the first valid frames. The explicit
 ~5 s calibration flow is Phase D.
+
+Monitoring is independent of the window: closing the debug window does not stop
+the duty cycle. Use **Pause Blinko** in the menu bar (or quit) to stop the camera
+and suspend reminders. Under normal operation the camera is on only during the
+12 s burst; the debug window's countdown and status badge show why it is off.
 
 ## Landmark CSV format
 
@@ -124,35 +186,149 @@ Manual test procedure:
 4. To create a replayable real session, use **Record Landmark Session…**, then
    replay it with **Replay Recorded Session…**.
 
+## Phase B acceptance status
+
+| Item | Status |
+|------|--------|
+| RE-01…04 unit tests | ✅ passing |
+| NP-01…07 unit tests | ✅ passing (NP-07b covers no catch-up after suppression) |
+| GAP-01…07 unit tests | ✅ passing (fires at 5 s, repeats, blink resets, no-face/pause suppression, interval changes) |
+| Settings round-trip tests | ✅ passing for the adjustable intervals |
+| QH-01…02 unit tests | ✅ passing |
+| A reminder fires after 5 s without a blink | ✅ `BlinkGapPolicy`, repeats every 5 s |
+| A blink resets the reminder timer | ✅ covered by GAP-02 |
+| A blink hides a visible reminder immediately | ✅ wired through `NudgePresenter.dismiss()`; needs a camera check |
+| Blink interval adjustable from the menu bar | ✅ presets + Custom… (1–300 s) |
+| Auto-dismiss adjustable from the menu bar | ✅ presets + Never + Custom… (0.5–60 s) |
+| One-click pause works | ✅ implemented; needs a manual click-through |
+| Nothing fires while paused | ✅ policy suppression + heartbeat guard; covered by GAP-05 |
+| Reminder card never steals focus, dismisses < 3 s | ✅ centered card, 2.5 s; needs a visual check |
+| Camera denied + fallback enabled | ✅ 20 min interval, menu toggle, covered by NP-07 |
+
+Manual Phase B check:
+
+1. `swift run Blinko --debug` (or open the built app with `--debug`).
+2. Click **Preview Nudge**. A large card should appear in the center of the
+   screen without taking focus and disappear in under 3 s.
+3. Keep your eyes open without blinking. After ~5 s the card appears; if you
+   still do not blink it reappears every ~5 s. The debug row shows the gap
+   counter climbing to `5 / 5`.
+4. Blink while the card is visible: it fades out immediately instead of waiting
+   for the auto-dismiss timer, and the gap counter resets.
+5. Change **Blink Interval** and **Dismiss After** from the menu bar (presets or
+   **Custom…**) and confirm the new values appear in the menu titles and debug
+   row. With **Dismiss After → Never**, the card stays up until a blink.
+6. Choose **Pause Blinko** from the menu bar. The camera indicator goes off and
+   no further reminders appear.
+7. Choose **Resume Blinko**. Monitoring restarts with a fresh gap timer.
+8. Quiet hours are off by default. Toggle **Quiet Hours (22:00–08:00)** to verify
+   that reminders are suppressed while it is on.
+9. To check the camera-denied fallback, deny camera access, then choose
+   **Enable Timed Reminders**; the first reminder is due after 20 min.
+
+## Phase C acceptance status
+
+| Item | Status |
+|------|--------|
+| SC-01…09 unit tests (cadence, sleep, late ticks, clock jumps, lock, battery, idle) | ✅ passing (67 tests total) |
+| QH-03…05 unit tests (DST spring-forward/fall-back, time-zone change) | ✅ passing |
+| Absolute monotonic deadlines; no countdown timers between bursts | ✅ implemented |
+| One tolerant one-shot timer; `ProcessInfo` assertion only during a burst | ✅ implemented |
+| Overdue bursts after sleep are dropped, never queued | ✅ `handleWake` + late-grace test |
+| Lock/asleep/session-inactive events suspend the cadence via `NSWorkspace` | ✅ implemented; needs manual GUI check |
+| Low battery, idle and quiet-hours gates | ✅ pure gate tests; needs manual check |
+| Fullscreen / screen-sharing suppression | ✅ best-effort detection; needs manual check |
+| Focus / Do Not Disturb suppression | ⚠️ no public sandboxed API; flag is wired but stays false — use quiet hours |
+| Camera fully stopped between bursts (`AVCaptureSession.stopRunning()`) | ✅ implemented; **camera-light check pending** |
+| PF-01 RSS < 50 MB after 1 h | ⏳ not measured yet |
+| PF-02 average CPU < 3 % over 1 h | ⏳ not measured yet |
+| PF-03 CPU between bursts ≈ 0 % | ⏳ not measured yet |
+| PF-04 Energy Impact not high | ⏳ check Activity Monitor manually |
+| PF-05 no stuck camera light across sleep/wake | ⏳ needs 8 h soak |
+| PF-06 camera indicator on only during bursts | ⏳ needs manual check |
+
+Manual Phase C check:
+
+1. Launch with `swift run Blinko --debug` or `open build/Blinko.app --args --debug`.
+2. The first burst starts immediately. The debug row shows `on 0.x/12s`;
+   watch the green camera indicator on the Mac.
+3. After ~12 s the row changes to `off 60s` and the camera indicator must go
+   dark. It should stay dark for the rest of the minute. The menu bar status
+   also reads `camera off, next in Ns` (it refreshes when the menu opens).
+4. Press **Sample Now** in the menu or debug window to confirm an immediate
+   burst. Press **Pause Blinko**: the camera stops and no reminders appear;
+   **Resume Blinko** starts a fresh burst.
+5. Change **Sampling** to `8 s every 40 s` and confirm the debug `Duty` readout
+   and the indicator timing follow the new values.
+6. Sleep the Mac (or lock the screen) during a burst and wake/unlock after a few
+   minutes. There must be no burst until a full interval after wake, and no
+   flood of nudges. The low-rate streak is reset after a long sleep.
+7. Unplug and let the battery drop below 20 % (or use a simulated environment);
+   the badge should read `CAMERA OFF — LOW BATTERY`. Plugging back in resumes
+   sampling. Leaving the keyboard/mouse untouched for 5 min should show
+   `CAMERA OFF — IDLE`.
+8. Start a fullscreen app or a screen-sharing session; the badge should show
+   the corresponding reason. Focus/DND cannot be detected by a sandboxed app —
+   use **Quiet Hours** when you need a guaranteed silence window.
+9. For PF-01…03, leave the app running for an hour and record numbers with:
+
+   ```sh
+   ./Scripts/measure-app.sh 3600 10
+   # or, for a specific process:
+   BLINKO_PID=1234 ./Scripts/measure-app.sh 3600 10
+   ```
+
+   Record the printed RSS/CPU summary here after review. For PF-03, sample
+   manually during the `off` part of a burst; `top` should show ≈ 0.0 % CPU.
+
+Recorded budgets (fill in after running the procedure above):
+
+| Metric | Measured | Budget |
+|--------|----------|--------|
+| RSS after 1 h | — | < 50 MB |
+| Average CPU over 1 h | — | < 3 % |
+| CPU between bursts | — | ≈ 0 % |
+
 ## Layout
 
 ```text
 Sources/
   BlinkoCore/                     pure logic, no AVFoundation/Vision/AppKit
     Core/Clock.swift              Clock, SystemClock, FakeClock
+    Core/BlinkGapPolicy.swift     no-blink watchdog, adjustable cadence (GAP-01…07)
+    Core/RateEstimator.swift      BurstSummary, RateEstimator (RE-01…04)
+    Core/BurstAccumulator.swift   valid-face seconds + blink count per burst
+    Core/NudgePolicy.swift        rate/fallback policy, suppression (NP-01…07)
+    Core/QuietHours.swift         quiet-window evaluation (QH-01…05)
+    Core/SamplingScheduler.swift  absolute-time duty cycle (SC-01…07)
+    Core/BurstGate.swift          pure gating decision (SC-08/09)
+    System/ActivitySeams.swift    IdleMonitor, BatteryMonitor, PresenceMonitor
     Detection/                    FaceObservation, LandmarkExtractor,
                                   EyeMetrics, BlinkDetector
     Capture/                      FrameSource seams, LandmarkCSV,
                                   ReplayFrameSource
     Persistence/Store.swift       Store protocol + settings/aggregate types (Phase D)
-    System/PowerObserver.swift    PowerObserver seam (Phase C)
+    System/PowerObserver.swift    PowerObserver seam
   Blink/
     App/                          AppDelegate, MenuBarController, launch options
     Capture/CameraFrameSource.swift
     Detection/VisionLandmarkExtractor.swift
     Pipeline/DetectionPipeline.swift
+    Monitor/BlinkMonitor.swift    duty-cycled pipeline + gap watchdog
+    Nudge/                        NudgePanel, NudgePresenter
     Debug/                        DebugModel, DebugView, DebugWindowController
-Tests/BlinkoCoreTests/            Swift Testing suites (EM/BD/CSV/Clock)
+    System/                       SystemPowerObserver, SystemSensors,
+                                  SystemPresenceMonitor, BurstActivity
+Tests/BlinkoCoreTests/            Swift Testing suites (EM/BD/RE/NP/GAP/SC/QH/CSV/Clock)
 Resources/                        Info.plist, Blinko.entitlements
-Scripts/                          build-app.sh, test.sh, fixture generator
+Scripts/                          build-app.sh, test.sh, measure-app.sh,
+                                  fixture generator
 Fixtures/synthetic_session.csv    synthetic replay sample
 ```
 
 Mapping to the spec's §3 tree: SwiftPM requires target roots, so `App/`,
 `Capture/`, `Detection/`, `Core/`, `Nudge/`, `Persistence/`, `System/` live
 inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
-`RateEstimator`, `NudgePolicy`, `SamplingScheduler`, `NudgePanel` are not
-implemented yet (Phases B/C).
 
 ## Privacy and safety
 
@@ -177,15 +353,33 @@ implemented yet (Phases B/C).
   the frame by design.
 - **Frame drops:** a blink that falls entirely inside a dropped-frame gap cannot
   be observed. Gaps up to 100 ms are covered by BD-08.
-- **DND / Focus / fullscreen suppression:** Phase C. macOS exposes no public
-  Focus-status API, so that detection will be best-effort and documented.
+- **DND / Focus suppression:** macOS exposes no public Focus-status API for a
+  sandboxed ad-hoc app, so the suppression flag is wired but remains false.
+  Use **Quiet Hours** when silence must be guaranteed.
+- **Fullscreen / screen-sharing detection is best-effort:** a frontmost window
+  matching a display size counts as fullscreen, and a small list of known
+  screen-sharing bundle IDs is checked. Unusual window layouts or new remote
+  tools may not be detected; **Pause Blinko** is always available.
+- **Camera light is on during bursts:** expected for a 12 s window each minute.
+  Between bursts the capture session is stopped; if the indicator stays on,
+  quit and report it.
+- **No Settings UI yet:** the blink interval (default 5 s) and auto-dismiss
+  duration (default 2.5 s) are adjustable from the menu bar for this session;
+  sound (off) and quiet hours (off by default, menu toggle) are also menu-bar or
+  compile-time settings. Phase D adds a persistent Settings UI.
+- **Fallback interval is fixed at 20 min** (20-20-20 style) and is offered only
+  when the camera is unavailable or denied.
+- **Policy state is in memory:** pause state, nudge history and daily aggregates
+  are not persisted until Phase D.
 
 ## Next phases
 
-- **Phase B:** `RateEstimator`, `NudgePolicy`, non-activating nudge panel,
-  one-click pause, fallback interval reminders.
-- **Phase C:** duty-cycled scheduling, sleep/wake/idle/battery/fullscreen
-  suppression, quiet hours, measured CPU/RSS.
+- **Phase B:** ✅ `BlinkGapPolicy` 5 s no-blink watchdog, centered reminder card,
+  one-click pause, quiet-hours toggle, fallback interval reminders.
+  `RateEstimator` / `NudgePolicy` remain as diagnostics.
+- **Phase C:** ✅ duty-cycled scheduling, sleep/wake/idle/battery/fullscreen
+  gating, quiet-hours wiring, menu-selectable cadence. Manual CPU/RSS and camera
+  indicator checks still need to be recorded above.
 - **Phase D:** JSON store + migrations, Settings UI, calibration flow,
   single-instance guard, login item, delete-all-data, 8-hour soak, README
   completion.

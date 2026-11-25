@@ -1,0 +1,89 @@
+import Testing
+import Foundation
+@testable import BlinkoCore
+
+@Suite("BlinkGapPolicy")
+struct BlinkGapPolicyTests {
+    @Test("GAP-01 fires after the interval with no blink")
+    func gap01Fires() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+
+        #expect(policy.evaluate(now: 4.5, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 5, facePresent: true) == .nudge(.noBlink))
+        #expect(policy.nudgeCount == 1)
+    }
+
+    @Test("GAP-02 a blink restarts the countdown")
+    func gap02BlinkResets() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+
+        policy.recordBlink(at: 4)
+        #expect(policy.evaluate(now: 8.9, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 9, facePresent: true) == .nudge(.noBlink))
+    }
+
+    @Test("GAP-03 repeats every interval while blinking stays absent")
+    func gap03Repeats() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+
+        #expect(policy.evaluate(now: 5, facePresent: true) == .nudge(.noBlink))
+        #expect(policy.evaluate(now: 9.9, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 10, facePresent: true) == .nudge(.noBlink))
+        #expect(policy.evaluate(now: 15, facePresent: true) == .nudge(.noBlink))
+        #expect(policy.nudgeCount == 3)
+    }
+
+    @Test("GAP-04 no face means no reminder and a fresh countdown")
+    func gap04NoFace() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+
+        #expect(policy.evaluate(now: 4, facePresent: false) == .none)
+        #expect(policy.evaluate(now: 8.9, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 9, facePresent: true) == .nudge(.noBlink))
+    }
+
+    @Test("GAP-05 pause or quiet hours suppress and re-arm")
+    func gap05Suppression() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+
+        #expect(
+            policy.evaluate(now: 4, facePresent: true, suppression: [.paused])
+                == .suppressed([.paused])
+        )
+        #expect(policy.evaluate(now: 8.9, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 9, facePresent: true) == .nudge(.noBlink))
+    }
+
+    @Test("GAP-06 reset clears the watchdog")
+    func gap06Reset() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+        #expect(policy.evaluate(now: 5, facePresent: true) == .nudge(.noBlink))
+
+        policy.reset()
+        #expect(policy.lastBlinkAt == nil)
+        #expect(policy.nudgeCount == 0)
+        #expect(policy.evaluate(now: 10, facePresent: true) == .none)
+    }
+
+    @Test("GAP-07 changing the interval re-arms from the last blink")
+    func gap07IntervalChange() {
+        let policy = BlinkGapPolicy(config: BlinkGapPolicyConfig(interval: 5))
+        policy.start(at: 0)
+        policy.recordBlink(at: 10)
+
+        // The old 5 s interval would fire at 15; the new 20 s one waits until 30.
+        policy.setInterval(20, at: 12)
+        #expect(policy.evaluate(now: 29.9, facePresent: true) == .none)
+        #expect(policy.evaluate(now: 30, facePresent: true) == .nudge(.noBlink))
+
+        // Lowering the interval takes effect immediately.
+        policy.setInterval(3, at: 31)
+        #expect(policy.evaluate(now: 33, facePresent: true) == .nudge(.noBlink))
+    }
+}

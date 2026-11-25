@@ -5,12 +5,13 @@ through the webcam and will nudge the user to blink. Local-first, sandboxed, no
 networking code.
 
 **Current status: Phase 0 (bootstrap) + Phase A (detection prototype) + Phase B
-(reminders) + Phase C (scheduling & power) implemented.** The camera now runs in
-short bursts — 12 s every 60 s by default — and is fully stopped in between, so
-the camera indicator is dark most of the time. The reminder trigger is a 5 s
-no-blink watchdog inside each burst; the rate estimator remains as a diagnostic.
-Phase C is awaiting review and the manual camera-light/CPU checks in §“Phase C
-acceptance status”.
+(reminders) + Phase C (scheduling & power) + Phase D (settings, persistence &
+polish) implemented.** The camera runs in short bursts — 12 s every 60 s by
+default — and is fully stopped in between, so the camera indicator is dark most
+of the time. Settings, the guided calibration baseline and daily aggregate counts
+now persist in a versioned, atomic JSON store. Phase D is awaiting review and the
+manual checks in §“Phase D acceptance status” (single instance, login item,
+8-hour soak).
 
 ---
 
@@ -46,9 +47,24 @@ acceptance status”.
   **Preview Nudge** buttons.
 - Replay harness that runs a recorded landmark CSV through the same pipeline.
 - Debug-only landmark CSV recorder (derived eye points only — never pixels).
+- **Settings window** (menu bar → **Settings…**, ⌘,) with validated controls for
+  pause, sound, login item, burst/interval, idle and battery thresholds, reminder
+  timing, quiet hours, calibration and data deletion. Invalid values are rejected
+  inline with a reason (DB-05).
+- **Guided calibration**: a 5 s open-eye burst computes the median baseline and
+  seeds the detector; the baseline and date persist across launches.
+- **Versioned JSON store** in Application Support with atomic writes, serialized
+  writers, v1→v2 migration, one aggregate row per day, and `0600` permissions.
+  Only settings and daily counts are stored (DB-01…07).
+- **Single-instance guard** (AP-01): a second launch asks the running instance to
+  open Settings via `blinko://settings` + a distributed notification, then exits.
+- **Login item** via `SMAppService.mainApp` (AP-02), with the real status shown in
+  Settings; no executable path is persisted.
+- **Delete all data** restores defaults and empties the store (DB-06).
 - Menu bar item (`LSUIElement`), no Dock icon, sandboxed with camera access.
-- 67 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…07, GAP-01…07,
-  SC-01…09, QH-01…05, Settings round-trips, CSV round-trip and the clock seam.
+- 81 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…07, GAP-01…07,
+  SC-01…09, QH-01…05, DB-01…07, calibration, Settings validation/round-trips,
+  CSV round-trip and the clock seam.
 
 ## Requirements
 
@@ -109,6 +125,8 @@ The menu bar menu contains:
   (default), 20/120 and 30/300 s.
 - **Sample Now** — start an out-of-band burst without waiting for the cadence.
 - **Retry Camera** — shown when camera access was denied.
+- **Settings…** (⌘,) — persistent settings, calibration, login item and
+  delete-all-data.
 - **Show Detection Debug…** — live trace, rate and policy state.
 - **Replay Recorded Session…** and **Record Landmark Session…**.
 - **Quit Blinko**.
@@ -122,6 +140,52 @@ command line**. Use the menu bar items instead:
 
 `--replay` still works in the sandboxed app for files inside its own container
 (`~/Library/Containers/com.local.blinko/Data/`).
+
+## Settings, persistence and privacy
+
+Open **Settings…** from the menu bar (⌘,). The window has five sections:
+
+- **General** — pause, reminder sound, launch at login, privacy note.
+- **Sampling & Power** — burst length, cadence, idle threshold, low-battery
+  threshold.
+- **Reminders** — no-blink interval, auto-dismiss, camera-denied fallback and
+  quiet hours (with start/end time pickers).
+- **Calibration** — run the guided 5 s baseline capture, see the saved baseline
+  and date.
+- **Data & Privacy** — store path, today’s aggregate counts, and **Delete All
+  Blinko Data…**.
+
+Settings are validated before they are applied; invalid values show an inline
+reason and never reach the store (DB-05). Menu-bar changes are saved immediately.
+
+The store lives at:
+
+```text
+~/Library/Containers/com.local.blinko/Data/Library/Application Support/Blinko/blinko-store.json
+```
+
+It contains only `schemaVersion`, `settings`, and one row per day with
+`date`, `validSeconds`, `blinkCount` and `nudgeCount`. Writes are atomic
+(temp file + rename) and serialized on one queue, so concurrent writers cannot
+lose updates (DB-04). The current schema is **v2**; v1 files migrate in memory and
+are written back with the version bump only after every migration step succeeds.
+A failed migration leaves the original file intact and the app starts with
+defaults (DB-03).
+
+**Single instance (AP-01):** launching a second copy sends the running instance a
+`blinko://settings` URL plus a distributed notification, then quits. The running
+instance opens its Settings window; no second scheduler or camera session starts.
+
+**Login item (AP-02):** `SMAppService.mainApp` registers the app itself, so moving
+the `.app` does not break the login item. Ad-hoc-signed development builds may
+land in `requiresApproval`; approve them in **System Settings → General → Login
+Items**, or sign with your Apple ID. The persisted `launchAtLogin` value records
+your intent only — Blinko does not silently re-register if you later remove the
+login item in System Settings.
+
+**Delete all data (DB-06):** removes settings, the calibration baseline and daily
+counts, restores defaults, and unregisters the login item. Camera frames were
+never stored, so there is nothing else to delete.
 
 ## Debug window
 
@@ -139,8 +203,9 @@ command line**. Use the menu bar items instead:
 - **Sample Now** starts a burst immediately; **Preview Nudge** shows the
   centered reminder card without touching policy state.
 
-Baseline is estimated automatically from the first valid frames. The explicit
-~5 s calibration flow is Phase D.
+Baseline is estimated automatically from the first valid frames. For a stable
+starting point, open **Settings… → Calibration → Calibrate Now (5 s)**; the
+median open-eye openness is saved and reused on the next launch.
 
 Monitoring is independent of the window: closing the debug window does not stop
 the duty cycle. Use **Pause Blinko** in the menu bar (or quit) to stop the camera
@@ -230,7 +295,7 @@ Manual Phase B check:
 
 | Item | Status |
 |------|--------|
-| SC-01…09 unit tests (cadence, sleep, late ticks, clock jumps, lock, battery, idle) | ✅ passing (67 tests total) |
+| SC-01…09 unit tests (cadence, sleep, late ticks, clock jumps, lock, battery, idle) | ✅ passing (81 tests total) |
 | QH-03…05 unit tests (DST spring-forward/fall-back, time-zone change) | ✅ passing |
 | Absolute monotonic deadlines; no countdown timers between bursts | ✅ implemented |
 | One tolerant one-shot timer; `ProcessInfo` assertion only during a burst | ✅ implemented |
@@ -289,6 +354,48 @@ Recorded budgets (fill in after running the procedure above):
 | Average CPU over 1 h | — | < 3 % |
 | CPU between bursts | — | ≈ 0 % |
 
+## Phase D acceptance status
+
+| Item | Status |
+|------|--------|
+| DB-01 fresh install at latest schema | ✅ automated test |
+| DB-02 v1→v2 migration preserves data and bumps the version atomically | ✅ automated test |
+| DB-03 failed migration rolls back; app still starts on defaults | ✅ automated test |
+| DB-04 concurrent settings writes serialized, no lost update | ✅ automated test (50 writers) |
+| DB-05 invalid settings rejected with a reason shown in the UI | ✅ automated test + inline Settings errors |
+| DB-06 delete all data | ✅ automated test + confirmed UI flow |
+| DB-07 no frames, images or landmark arrays in the store | ✅ automated test + sandbox file inspection |
+| Guided 5 s calibration seeds and persists the baseline | ✅ collector tests + implementation; camera check pending |
+| AP-01 second instance opens the first instance's Settings | ✅ implemented (URL scheme + distributed notification); manual check pending |
+| AP-02 login item survives moving the app | ✅ `SMAppService.mainApp`; manual check pending |
+| AP-03…07 camera denial/in-use/unplug, non-stealing nudge | ✅ implemented in earlier phases; manual checks pending |
+| AP-08 zero outbound connections | ✅ no networking frameworks linked; `nettop` check pending |
+| PF-01…06 RSS, CPU, energy, 8 h soak, camera indicator | ⏳ manual; use `./Scripts/measure-app.sh` from the Phase C section |
+| 81 automated tests in 14 suites | ✅ `swift test` passing |
+
+Manual Phase D check:
+
+1. Launch and press ⌘, (or **Settings…**). Change the burst/interval, no-blink
+   interval, sound and quiet hours; click **Save**. Restart the app and confirm
+   the values are still there. Enter `1` as the burst length and confirm an
+   inline error appears and **Save** refuses it.
+2. With the camera working, run **Calibrate Now (5 s)** with your eyes open.
+   The saved baseline and date appear in Settings and survive a restart.
+3. Launch a second copy (`open build/Blinko.app`). The first instance's Settings
+   window should come forward and the second process should exit; only one
+   scheduler/camera session exists (confirm with `--debug`).
+4. Enable **Launch Blinko at login**, move `Blinko.app` to another folder, and
+   log out/in. It should still start, and Settings should show **Enabled**.
+   Ad-hoc builds may need approval in **System Settings → General → Login Items**.
+5. Check **Data & Privacy**: the store path is shown and today's counts increase
+   after bursts and nudges. The file contains only `schemaVersion`, `settings`
+   and per-day `aggregates`.
+6. Click **Delete All Blinko Data…**. Settings return to defaults, counts reset,
+   and the login item is unregistered.
+7. Leave the app running for 8 h with sleep/wake cycles. Record RSS/CPU and
+   confirm the camera indicator is dark between bursts (PF-01…06), and use
+   `nettop -m tcp -p <pid>` to confirm zero outbound connections (AP-08).
+
 ## Layout
 
 ```text
@@ -300,6 +407,7 @@ Sources/
     Core/BurstAccumulator.swift   valid-face seconds + blink count per burst
     Core/NudgePolicy.swift        rate/fallback policy, suppression (NP-01…07)
     Core/QuietHours.swift         quiet-window evaluation (QH-01…05)
+    Core/CalibrationCollector.swift median baseline for guided calibration
     Core/SamplingScheduler.swift  absolute-time duty cycle (SC-01…07)
     Core/BurstGate.swift          pure gating decision (SC-08/09)
     System/ActivitySeams.swift    IdleMonitor, BatteryMonitor, PresenceMonitor
@@ -307,10 +415,13 @@ Sources/
                                   EyeMetrics, BlinkDetector
     Capture/                      FrameSource seams, LandmarkCSV,
                                   ReplayFrameSource
-    Persistence/Store.swift       Store protocol + settings/aggregate types (Phase D)
+    Persistence/Store.swift       Store protocol + settings/aggregate types
+    Persistence/JSONStore.swift   atomic versioned JSON store + migrations
     System/PowerObserver.swift    PowerObserver seam
   Blink/
     App/                          AppDelegate, MenuBarController, launch options
+    Settings/                     SettingsModel, SettingsView, SettingsWindowController
+    System/LoginItemController.swift  SMAppService wrapper
     Capture/CameraFrameSource.swift
     Detection/VisionLandmarkExtractor.swift
     Pipeline/DetectionPipeline.swift
@@ -319,7 +430,7 @@ Sources/
     Debug/                        DebugModel, DebugView, DebugWindowController
     System/                       SystemPowerObserver, SystemSensors,
                                   SystemPresenceMonitor, BurstActivity
-Tests/BlinkoCoreTests/            Swift Testing suites (EM/BD/RE/NP/GAP/SC/QH/CSV/Clock)
+Tests/BlinkoCoreTests/            Swift Testing suites (EM/BD/RE/NP/GAP/SC/QH/DB/Calibration/CSV/Clock)
 Resources/                        Info.plist, Blinko.entitlements
 Scripts/                          build-app.sh, test.sh, measure-app.sh,
                                   fixture generator
@@ -363,14 +474,14 @@ inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
 - **Camera light is on during bursts:** expected for a 12 s window each minute.
   Between bursts the capture session is stopped; if the indicator stays on,
   quit and report it.
-- **No Settings UI yet:** the blink interval (default 5 s) and auto-dismiss
-  duration (default 2.5 s) are adjustable from the menu bar for this session;
-  sound (off) and quiet hours (off by default, menu toggle) are also menu-bar or
-  compile-time settings. Phase D adds a persistent Settings UI.
+- **Settings window changes apply on Save:** menu-bar shortcuts apply and persist
+  immediately; both paths write the same store. Closing the window with unsaved
+  edits discards them.
 - **Fallback interval is fixed at 20 min** (20-20-20 style) and is offered only
   when the camera is unavailable or denied.
-- **Policy state is in memory:** pause state, nudge history and daily aggregates
-  are not persisted until Phase D.
+- **Some policy state is intentionally in memory:** the nudge history and rate
+  streak reset on launch. Pause state, reminder cadence, calibration and daily
+  counts persist; one aggregate row is kept per calendar day.
 
 ## Next phases
 
@@ -380,6 +491,7 @@ inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
 - **Phase C:** ✅ duty-cycled scheduling, sleep/wake/idle/battery/fullscreen
   gating, quiet-hours wiring, menu-selectable cadence. Manual CPU/RSS and camera
   indicator checks still need to be recorded above.
-- **Phase D:** JSON store + migrations, Settings UI, calibration flow,
-  single-instance guard, login item, delete-all-data, 8-hour soak, README
-  completion.
+- **Phase D:** ✅ Settings window with validation, guided 5 s calibration,
+  versioned atomic JSON store + migrations, single-instance guard, login item,
+  delete-all-data, DB-01…07 automated tests. Manual AP/PF checks and the 8-hour
+  soak still need to be recorded above before sign-off.

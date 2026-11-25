@@ -54,6 +54,11 @@ struct LaunchOptions {
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private static let settingsURL = URL(string: "blinko://settings")!
+    private static let showSettingsNotification = Notification.Name(
+        "com.local.blinko.showSettings"
+    )
+
     private var menuBar: MenuBarController?
     private var monitor: BlinkMonitor?
     private var nudgePresenter: NudgePresenter?
@@ -64,6 +69,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var recordURL: URL?
     private var replayPipeline: DetectionPipeline?
     private var resumeMonitoringAfterReplay = false
+
+    // Phase D: persistence, settings window, login item and aggregates.
+    private var store: JSONStore?
+    private var loadedSettings = Settings()
+    private var settingsModel: SettingsModel?
+    private var settingsWindow: SettingsWindowController?
+    private let loginItem = LoginItemController()
+    private var todayAggregate: DailyAggregate?
+    private var aggregateDay: Date?
+    private var suppressSettingsSave = false
+    private var showSettingsObserver: NSObjectProtocol?
 
     private var isVerbose: Bool { options.exitAfterReplay || options.debugWindow }
 
@@ -82,10 +98,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         _ = NSApp.setActivationPolicy(.accessory)
 
+        if options.replayURL == nil, terminateIfAnotherInstanceIsRunning() {
+            return
+        }
+
+        let store = try? JSONStore()
+        self.store = store
+        if let store {
+            do {
+                loadedSettings = try store.loadSettings()
+            } catch {
+                log("settings load failed: \(error.localizedDescription)")
+            }
+        }
+        rollAggregateIfNeeded()
+        observeShowSettingsRequests()
+
         nudgePresenter = NudgePresenter()
 
         let menuBar = MenuBarController()
         menuBar.onShowDebug = { [weak self] in self?.showDebugWindow() }
+        menuBar.onShowSettings = { [weak self] in self?.showSettings() }
         menuBar.onReplay = { [weak self] in self?.chooseReplayFile() }
         menuBar.onRecord = { [weak self] in self?.chooseRecordingFile() }
         menuBar.onTogglePause = { [weak self] in self?.togglePause() }
@@ -120,6 +153,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         replayPipeline = nil
         debugModel?.stop()
         nudgePresenter?.dismiss()
+        if let showSettingsObserver {
+            DistributedNotificationCenter.default().removeObserver(showSettingsObserver)
+            self.showSettingsObserver = nil
+        }
+    }
+
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard urls.contains(where: { $0.scheme == "blinko" && $0.host == "settings" }) else {
+            return
+        }
+        showSettings()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -131,10 +175,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func startMonitoring() {
         guard monitor == nil else { return }
 
-        let monitor = BlinkMonitor(clock: SystemClock(), settings: Settings())
+        let monitor = BlinkMonitor(clock: SystemClock(), settings: loadedSettings)
         monitor.onSnapshot = { [weak self] snapshot in
             self?.menuBar?.update(snapshot: snapshot)
             self?.debugModel?.update(monitor: snapshot)
+            self?.settingsModel?.update(snapshot: snapshot)
         }
         monitor.onSample = { [weak self] sample, detector in
             self?.debugModel?.ingest(sample: sample, detector: detector)
@@ -155,9 +200,216 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onSystemSuspend = { [weak self] in
             self?.nudgePresenter?.dismiss()
         }
+        monitor.onSettingsChanged = { [weak self] settings in
+            self?.persist(settings)
+        }
+        monitor.onBurstCompleted = { [weak self] summary in
+            self?.record(summary)
+        }
+        monitor.onCalibrationState = { [weak self] state in
+            self?.settingsModel?.update(calibration: state)
+        }
         self.monitor = monitor
 
         monitor.start(recorder: makeRecorderIfNeeded())
+    }
+
+    // MARK: - Single instance & Settings
+
+    /// AP-01: a second launch asks the running instance to show Settings and
+    /// exits without creating a second scheduler.
+    private func terminateIfAnotherInstanceIsRunning() -> Bool {
+        guard let bundleID = Bundle.main.bundleIdentifier else { return false }
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            .filter { $0.processIdentifier != currentPID }
+        guard let other = others.first else { return false }
+
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.showSettingsNotification,
+            object: nil,
+            userInfo: nil
+        )
+        NSWorkspace.shared.open(Self.settingsURL)
+        _ = other.activate(options: [])
+        DispatchQueue.main.async {
+            NSApp.terminate(nil)
+        }
+        return true
+    }
+
+    private func observeShowSettingsRequests() {
+        showSettingsObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Self.showSettingsNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.showSettings()
+        }
+    }
+
+    private func showSettings() {
+        let model: SettingsModel
+        if let existing = settingsModel {
+            model = existing
+        } else {
+            let created = SettingsModel(
+                settings: monitor?.settings ?? loadedSettings,
+                storePath: store?.fileURL.path ?? "Unavailable",
+                loginItemEnabled: loginItem.isEnabled,
+                loginItemStatus: loginItem.statusDescription
+            )
+            created.onApply = { [weak self] settings in self?.applySettings(settings) }
+            created.onCalibrate = { [weak self] in self?.monitor?.startCalibration() }
+            created.onCancelCalibration = { [weak self] in self?.monitor?.cancelCalibration() }
+            created.onDeleteAllData = { [weak self] in self?.deleteAllData() }
+            created.onSetLaunchAtLogin = { [weak self] enabled in
+                self?.setLaunchAtLogin(enabled)
+            }
+            settingsModel = created
+            model = created
+        }
+
+        model.reload(
+            settings: monitor?.settings ?? loadedSettings,
+            snapshot: monitor?.snapshot(),
+            today: todayAggregate,
+            loginItemEnabled: loginItem.isEnabled,
+            loginItemStatus: loginItem.statusDescription
+        )
+
+        if settingsWindow == nil {
+            settingsWindow = SettingsWindowController(model: model)
+        }
+        settingsWindow?.show()
+    }
+
+    private func applySettings(_ settings: Settings) -> String? {
+        if let store {
+            do {
+                try store.saveSettings(settings)
+            } catch {
+                return error.localizedDescription
+            }
+        }
+
+        loadedSettings = settings
+        suppressSettingsSave = true
+        monitor?.apply(settings: settings)
+        suppressSettingsSave = false
+        nudgePresenter?.setAutoDismissSeconds(settings.autoDismissSeconds)
+        return nil
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) -> String? {
+        do {
+            try loginItem.setEnabled(enabled)
+        } catch {
+            return error.localizedDescription
+        }
+
+        loadedSettings.launchAtLogin = enabled
+        if let monitor {
+            monitor.setLaunchAtLogin(enabled)
+        } else {
+            try? store?.saveSettings(loadedSettings)
+        }
+        settingsModel?.update(
+            loginItemEnabled: loginItem.isEnabled,
+            status: loginItem.statusDescription
+        )
+        return nil
+    }
+
+    private func deleteAllData() -> String? {
+        if let store {
+            do {
+                try store.deleteAllData()
+            } catch {
+                return error.localizedDescription
+            }
+        }
+
+        let defaults = Settings()
+        loadedSettings = defaults
+        suppressSettingsSave = true
+        monitor?.apply(settings: defaults)
+        suppressSettingsSave = false
+        nudgePresenter?.setAutoDismissSeconds(defaults.autoDismissSeconds)
+
+        try? loginItem.setEnabled(false)
+
+        let day = Calendar.current.startOfDay(for: Date())
+        aggregateDay = day
+        todayAggregate = DailyAggregate(
+            date: day,
+            validSeconds: 0,
+            blinkCount: 0,
+            nudgeCount: 0
+        )
+        settingsModel?.update(today: todayAggregate)
+        settingsModel?.update(
+            loginItemEnabled: loginItem.isEnabled,
+            status: loginItem.statusDescription
+        )
+        return nil
+    }
+
+    // MARK: - Persistence & aggregates
+
+    private func persist(_ settings: Settings) {
+        guard !suppressSettingsSave else { return }
+        do {
+            try store?.saveSettings(settings)
+        } catch {
+            log("settings save failed: \(error.localizedDescription)")
+        }
+        loadedSettings = settings
+        nudgePresenter?.setAutoDismissSeconds(settings.autoDismissSeconds)
+    }
+
+    private func rollAggregateIfNeeded() {
+        let calendar = Calendar.current
+        let day = calendar.startOfDay(for: Date())
+        guard aggregateDay != day else { return }
+        aggregateDay = day
+
+        if let store, let aggregates = try? store.loadDailyAggregates(),
+           let existing = aggregates.first(where: {
+               calendar.isDate($0.date, inSameDayAs: day)
+           }) {
+            todayAggregate = existing
+        } else {
+            todayAggregate = DailyAggregate(
+                date: day,
+                validSeconds: 0,
+                blinkCount: 0,
+                nudgeCount: 0
+            )
+        }
+    }
+
+    private func record(_ summary: BurstSummary) {
+        rollAggregateIfNeeded()
+        todayAggregate?.validSeconds += summary.validSeconds
+        todayAggregate?.blinkCount += summary.blinkCount
+        persistTodayAggregate()
+    }
+
+    private func recordNudge() {
+        rollAggregateIfNeeded()
+        todayAggregate?.nudgeCount += 1
+        persistTodayAggregate()
+    }
+
+    private func persistTodayAggregate() {
+        guard let aggregate = todayAggregate else { return }
+        do {
+            try store?.recordDailyAggregate(aggregate)
+        } catch {
+            log("aggregate save failed: \(error.localizedDescription)")
+        }
+        settingsModel?.update(today: aggregate)
     }
 
     private func togglePause() {
@@ -197,6 +449,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             autoDismissSeconds: monitor?.settings.autoDismissSeconds ?? 2.5
         )
         menuBar?.pulse()
+        recordNudge()
 
         switch reason {
         case .noBlink: log("nudge: no blink for \(Int(monitor?.settings.noBlinkInterval ?? 0)) s")

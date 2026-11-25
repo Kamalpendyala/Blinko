@@ -30,6 +30,14 @@ struct MonitorSnapshot: Equatable {
     var suppression: NudgeSuppression
 }
 
+/// State of the guided calibration flow shown in Settings.
+enum CalibrationState: Equatable {
+    case idle
+    case collecting(progress: Double)
+    case completed(baseline: Double)
+    case failed(String)
+}
+
 extension NudgeSuppression {
     /// Short human-readable cause for the menu bar and debug window.
     var shortDescription: String? {
@@ -62,6 +70,12 @@ final class BlinkMonitor {
     var onError: ((FrameSourceError) -> Void)?
     /// Called when the system suspends sampling (sleep, lock, session switch).
     var onSystemSuspend: (() -> Void)?
+    /// Called whenever a setting changes, so the app can persist it.
+    var onSettingsChanged: ((Settings) -> Void)?
+    /// Called after a completed burst with aggregate-only values.
+    var onBurstCompleted: ((BurstSummary) -> Void)?
+    /// Progress/completion of the guided calibration flow.
+    var onCalibrationState: ((CalibrationState) -> Void)?
 
     private(set) var settings: Settings
     private(set) var isRunning = false
@@ -102,6 +116,13 @@ final class BlinkMonitor {
     private var cachedPresence = PresenceState()
     private var presenceCheckedAt: TimeInterval = -.infinity
 
+    // Guided calibration: collect ~5 s of open-eye openness, then seed the
+    // detector baseline with the median.
+    private let calibrationDuration: TimeInterval = 5
+    private var calibrationCollector: CalibrationCollector?
+    private var calibrationStartedAt: TimeInterval?
+    private var calibrationTimer: Timer?
+
     init(
         clock: Clock = SystemClock(),
         settings: Settings = Settings(),
@@ -135,7 +156,7 @@ final class BlinkMonitor {
 
         self.recorder = recorder
         isRunning = true
-        isPaused = false
+        isPaused = settings.paused
         cameraDenied = false
         deliveredNudgeCount = 0
         rateEstimator.reset()
@@ -152,6 +173,7 @@ final class BlinkMonitor {
         presenceCheckedAt = -.infinity
         activity.end()
         cancelTimers()
+        resetCalibrationState(notify: false)
 
         scheduler = SamplingScheduler(
             config: SamplingSchedulerConfig(
@@ -166,6 +188,12 @@ final class BlinkMonitor {
         }
         powerObserver.start()
 
+        guard !isPaused else {
+            setStatus("Paused — camera off, no reminders.")
+            publish()
+            return
+        }
+
         setStatus("Requesting camera access…")
         publish()
         requestCamera()
@@ -178,6 +206,7 @@ final class BlinkMonitor {
         isRunning = false
         isPaused = false
         cancelTimers()
+        resetCalibrationState(notify: false)
         stopCurrentBurst()
         scheduler.stop()
         powerObserver.stop()
@@ -201,7 +230,12 @@ final class BlinkMonitor {
     func pause() {
         assert(Thread.isMainThread)
         guard isRunning, !isPaused else { return }
+        settings.paused = true
+        pauseInternal()
+        settingsDidChange()
+    }
 
+    private func pauseInternal() {
         isPaused = true
         cancelTimers()
         stopCurrentBurst()
@@ -219,8 +253,14 @@ final class BlinkMonitor {
     func resume() {
         assert(Thread.isMainThread)
         guard isRunning, isPaused else { return }
+        settings.paused = false
+        resumeInternal()
+        settingsDidChange()
+    }
 
+    private func resumeInternal() {
         isPaused = false
+        powerObserver.start()
         rateEstimator.reset()
         nudgePolicy.resetLowStreak()
         burst.reset()
@@ -268,6 +308,7 @@ final class BlinkMonitor {
 
     func setFallbackRemindersEnabled(_ enabled: Bool) {
         assert(Thread.isMainThread)
+        guard settings.fallbackRemindersEnabled != enabled else { return }
         settings.fallbackRemindersEnabled = enabled
 
         if enabled, cameraDenied, !isPaused {
@@ -277,36 +318,50 @@ final class BlinkMonitor {
             nudgePolicy.stopFallback()
             stopFallbackTimer()
         }
+        settingsDidChange()
         publish()
     }
 
     func setSoundEnabled(_ enabled: Bool) {
         assert(Thread.isMainThread)
+        guard settings.soundEnabled != enabled else { return }
         settings.soundEnabled = enabled
+        settingsDidChange()
         publish()
     }
 
     func setQuietHoursEnabled(_ enabled: Bool) {
         assert(Thread.isMainThread)
+        guard settings.quietHours.enabled != enabled else { return }
         settings.quietHours.enabled = enabled
         if enabled {
-            // Do not fire immediately when quiet hours switch on, and stop the
-            // camera right away rather than waiting for the next gate check.
-            gapPolicy.start(at: clock.monotonicNow)
-            if scheduler.isBursting {
-                cancelTimers()
-                stopCurrentBurst()
-                scheduler.abortBurst(at: clock.monotonicNow)
-                // Keep a slow retry alive so sampling resumes when the window
-                // ends without requiring the menu toggle to be pressed again.
-                scheduleNextEvaluation()
-                setStatus("Camera off — quiet hours.")
-            }
-        } else if !isPaused, !cameraDenied, !isSystemBlocked {
-            scheduler.resume(at: clock.monotonicNow)
-            scheduleNextEvaluation()
+            enterQuietHours()
+        } else {
+            leaveQuietHours()
         }
+        settingsDidChange()
         publish()
+    }
+
+    private func enterQuietHours() {
+        // Do not fire immediately when quiet hours switch on, and stop the
+        // camera right away rather than waiting for the next gate check.
+        gapPolicy.start(at: clock.monotonicNow)
+        if scheduler.isBursting {
+            cancelTimers()
+            stopCurrentBurst()
+            scheduler.abortBurst(at: clock.monotonicNow)
+            // Keep a slow retry alive so sampling resumes when the window
+            // ends without requiring the menu toggle to be pressed again.
+            scheduleNextEvaluation()
+            setStatus("Camera off — quiet hours.")
+        }
+    }
+
+    private func leaveQuietHours() {
+        guard !isPaused, !cameraDenied, !isSystemBlocked else { return }
+        scheduler.resume(at: clock.monotonicNow)
+        scheduleNextEvaluation()
     }
 
     /// Changes the duty cycle while running. The active burst, if any, is
@@ -330,23 +385,86 @@ final class BlinkMonitor {
         if isRunning, !isPaused, !cameraDenied {
             scheduleNextEvaluation()
         }
+        settingsDidChange()
         publish()
     }
 
     /// Updates the no-blink interval and re-arms the watchdog immediately.
     func setNoBlinkInterval(_ seconds: Double) {
         assert(Thread.isMainThread)
-        guard seconds > 0 else { return }
+        guard seconds > 0, settings.noBlinkInterval != seconds else { return }
         settings.noBlinkInterval = seconds
         gapPolicy.setInterval(seconds, at: clock.monotonicNow)
+        settingsDidChange()
         publish()
     }
 
     /// Updates the card's auto-dismiss duration. Zero means "until a blink".
     func setAutoDismissSeconds(_ seconds: Double) {
         assert(Thread.isMainThread)
-        guard seconds >= 0 else { return }
+        guard seconds >= 0, settings.autoDismissSeconds != seconds else { return }
         settings.autoDismissSeconds = seconds
+        settingsDidChange()
+        publish()
+    }
+
+    /// Remembers the login-item intent. `SMAppService` is the actual state.
+    func setLaunchAtLogin(_ enabled: Bool) {
+        assert(Thread.isMainThread)
+        guard settings.launchAtLogin != enabled else { return }
+        settings.launchAtLogin = enabled
+        settingsDidChange()
+        publish()
+    }
+
+    /// Applies a whole settings document from the Settings window or after a
+    /// delete-all-data reset, reconfiguring the live monitor in one step.
+    func apply(settings newSettings: Settings) {
+        assert(Thread.isMainThread)
+        let previous = settings
+        settings = newSettings
+
+        if newSettings.burstSeconds != previous.burstSeconds
+            || newSettings.intervalSeconds != previous.intervalSeconds {
+            let now = clock.monotonicNow
+            scheduler.setBurstSeconds(newSettings.burstSeconds, at: now)
+            scheduler.setInterval(newSettings.intervalSeconds, at: now)
+        }
+        if newSettings.noBlinkInterval != previous.noBlinkInterval {
+            gapPolicy.setInterval(newSettings.noBlinkInterval, at: clock.monotonicNow)
+        }
+
+        if newSettings.paused != isPaused {
+            if newSettings.paused {
+                pauseInternal()
+            } else {
+                resumeInternal()
+            }
+        } else if !isPaused {
+            if newSettings.quietHours.enabled != previous.quietHours.enabled {
+                if newSettings.quietHours.enabled {
+                    enterQuietHours()
+                } else {
+                    leaveQuietHours()
+                }
+            }
+
+            if newSettings.fallbackRemindersEnabled != previous.fallbackRemindersEnabled {
+                if newSettings.fallbackRemindersEnabled, cameraDenied {
+                    nudgePolicy.beginFallback(at: clock.monotonicNow)
+                    startFallbackTimerIfNeeded()
+                } else if !newSettings.fallbackRemindersEnabled {
+                    nudgePolicy.stopFallback()
+                    stopFallbackTimer()
+                }
+            }
+
+            if isRunning, !cameraDenied {
+                scheduleNextEvaluation()
+            }
+        }
+
+        settingsDidChange()
         publish()
     }
 
@@ -370,6 +488,93 @@ final class BlinkMonitor {
         if wasBursting {
             startCapture()
         }
+    }
+
+    // MARK: - Calibration
+
+    /// Runs the guided ~5 s calibration: collects open-eye openness during a
+    /// burst and seeds the detector with the median.
+    func startCalibration() {
+        assert(Thread.isMainThread)
+        guard isRunning, !isPaused, !cameraDenied else {
+            onCalibrationState?(.failed("Start Blinko and allow camera access before calibrating."))
+            return
+        }
+        guard !isSystemBlocked else {
+            onCalibrationState?(.failed("Calibration is unavailable while the screen is locked or the Mac is asleep."))
+            return
+        }
+
+        calibrationTimer?.invalidate()
+        calibrationTimer = nil
+        calibrationCollector = CalibrationCollector()
+        calibrationStartedAt = clock.monotonicNow
+        onCalibrationState?(.collecting(progress: 0))
+
+        if !scheduler.isBursting {
+            sampleNow()
+        }
+
+        let timer = Timer(timeInterval: calibrationDuration, repeats: false) { [weak self] _ in
+            self?.finishCalibration()
+        }
+        timer.tolerance = 0.2
+        RunLoop.main.add(timer, forMode: .common)
+        calibrationTimer = timer
+    }
+
+    func cancelCalibration() {
+        assert(Thread.isMainThread)
+        guard calibrationCollector != nil else { return }
+        resetCalibrationState(notify: false)
+        onCalibrationState?(.idle)
+        setStatus("Calibration cancelled.")
+        publish()
+    }
+
+    private func finishCalibration() {
+        guard let collector = calibrationCollector else { return }
+        calibrationTimer?.invalidate()
+        calibrationTimer = nil
+        calibrationCollector = nil
+        calibrationStartedAt = nil
+
+        let result = collector.finish()
+        guard let baseline = result.baseline, baseline.isFinite,
+              (0.01...1.0).contains(baseline) else {
+            onCalibrationState?(.failed(
+                "Not enough open-eye data. Face the camera in good light and try again."
+            ))
+            publish()
+            return
+        }
+
+        pipeline?.detector.calibrate(with: collector.samples)
+        settings.calibrationBaseline = baseline
+        settings.calibrationDate = clock.now
+        gapPolicy.start(at: clock.monotonicNow)
+        settingsDidChange()
+        onCalibrationState?(.completed(baseline: baseline))
+        setStatus(String(format: "Calibrated — baseline %.3f.", baseline))
+        publish()
+    }
+
+    private func abortCalibration(reason: String?) {
+        guard calibrationCollector != nil else { return }
+        resetCalibrationState(notify: false)
+        if let reason {
+            onCalibrationState?(.failed(reason))
+        } else {
+            onCalibrationState?(.idle)
+        }
+    }
+
+    private func resetCalibrationState(notify: Bool) {
+        calibrationTimer?.invalidate()
+        calibrationTimer = nil
+        calibrationCollector = nil
+        calibrationStartedAt = nil
+        if notify { onCalibrationState?(.idle) }
     }
 
     // MARK: - Camera
@@ -397,6 +602,9 @@ final class BlinkMonitor {
         } else {
             let created = DetectionPipeline(recorder: recorder)
             created.delegate = self
+            if let baseline = settings.calibrationBaseline, baseline > 0 {
+                created.detector.calibrate(with: [baseline])
+            }
             self.pipeline = created
             pipeline = created
         }
@@ -409,6 +617,7 @@ final class BlinkMonitor {
     ) {
         cameraDenied = true
         cancelTimers()
+        abortCalibration(reason: "Camera unavailable during calibration.")
         stopCurrentBurst()
         scheduler.stop()
         if discardCamera {
@@ -470,6 +679,11 @@ final class BlinkMonitor {
     }
 
     private func endBurst(at now: TimeInterval) {
+        if calibrationCollector != nil {
+            // A burst that ends before the 5 s window cannot produce a stable
+            // baseline; ask for a retry instead of seeding from a partial run.
+            abortCalibration(reason: "Calibration was cut short by the sampling window. Please try again.")
+        }
         stopHeartbeat()
         pipeline?.stopCamera()
         finishBurst(at: now)
@@ -484,6 +698,7 @@ final class BlinkMonitor {
     /// sleep, quiet hours, camera loss).
     private func stopCurrentBurst() {
         guard scheduler.isBursting else { return }
+        abortCalibration(reason: "Calibration interrupted.")
         stopHeartbeat()
         pipeline?.stopCamera()
         burst.reset()
@@ -495,6 +710,7 @@ final class BlinkMonitor {
     private func finishBurst(at now: TimeInterval) {
         guard let summary = burst.finish(at: now) else { return }
         rateEstimator.ingest(summary)
+        onBurstCompleted?(summary)
     }
 
     private func scheduleNextEvaluation() {
@@ -532,6 +748,10 @@ final class BlinkMonitor {
             lastValidFaceAt = sample.timestamp
         }
         burst.record(sample)
+
+        if let collector = calibrationCollector, sample.valid, let openness = sample.openness {
+            collector.add(openness: openness)
+        }
     }
 
     private func ingest(blink: BlinkEvent) {
@@ -563,6 +783,12 @@ final class BlinkMonitor {
         guard isRunning, !isPaused, scheduler.isBursting else { return }
 
         let now = clock.monotonicNow
+        if let started = calibrationStartedAt {
+            let progress = min(1, max(0, (now - started) / calibrationDuration))
+            onCalibrationState?(.collecting(progress: progress))
+            publishIfChanged()
+            return
+        }
         let facePresent = lastValidFaceAt.map { now - $0 <= 2 } ?? false
         let suppression = currentSuppression(now: now, includeCameraUnavailable: false)
         let decision = gapPolicy.evaluate(
@@ -776,6 +1002,15 @@ final class BlinkMonitor {
             intervalSeconds: settings.intervalSeconds,
             suppression: currentSuppression(now: now, includeCameraUnavailable: false)
         )
+    }
+
+    /// Current state without publishing, for the Settings window.
+    func snapshot() -> MonitorSnapshot {
+        makeSnapshot()
+    }
+
+    private func settingsDidChange() {
+        onSettingsChanged?(settings)
     }
 
     private func publish() {

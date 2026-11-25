@@ -3,6 +3,7 @@ import QuartzCore
 
 final class MenuBarController: NSObject {
     var onShowDebug: (() -> Void)?
+    var onShowSettings: (() -> Void)?
     var onReplay: (() -> Void)?
     var onRecord: (() -> Void)?
     var onTogglePause: (() -> Void)?
@@ -23,6 +24,7 @@ final class MenuBarController: NSObject {
     private let blinkIntervalItem = NSMenuItem(title: "Blink Interval", action: nil, keyEquivalent: "")
     private let autoDismissItem = NSMenuItem(title: "Dismiss After", action: nil, keyEquivalent: "")
     private let samplingItem = NSMenuItem(title: "Sampling", action: nil, keyEquivalent: "")
+    private let settingsItem = NSMenuItem(title: "Settings…", action: nil, keyEquivalent: ",")
     private let sampleNowItem = NSMenuItem(title: "Sample Now", action: nil, keyEquivalent: "s")
     private let retryItem: NSMenuItem
     private var blinkPresetItems: [(seconds: Double, item: NSMenuItem)] = []
@@ -83,6 +85,10 @@ final class MenuBarController: NSObject {
         )
         debugItem.target = self
 
+        settingsItem.target = self
+        settingsItem.action = #selector(showSettings)
+        settingsItem.keyEquivalentModifierMask = [.command]
+
         let replayItem = NSMenuItem(
             title: "Replay Recorded Session…",
             action: #selector(replay),
@@ -117,6 +123,7 @@ final class MenuBarController: NSObject {
         menu.addItem(autoDismissItem)
         menu.addItem(samplingItem)
         menu.addItem(.separator())
+        menu.addItem(settingsItem)
         menu.addItem(debugItem)
         menu.addItem(replayItem)
         menu.addItem(recordItem)
@@ -338,6 +345,7 @@ final class MenuBarController: NSObject {
         autoDismissItem.isHidden = true
         samplingItem.isHidden = true
         retryItem.isHidden = true
+        settingsItem.isHidden = true
     }
 
     /// A single, short attention dip on the menu bar icon.
@@ -399,6 +407,10 @@ final class MenuBarController: NSObject {
 
     @objc private func showDebug() {
         onShowDebug?()
+    }
+
+    @objc private func showSettings() {
+        onShowSettings?()
     }
 
     @objc private func replay() {

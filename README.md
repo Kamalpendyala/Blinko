@@ -93,6 +93,38 @@ Apple Development identity instead of ad-hoc:
 CODESIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./Scripts/build-app.sh
 ```
 
+### Memory hot-path optimizations
+
+The live pipeline keeps per-burst allocations bounded:
+
+- `CameraFrameSource` caps the front camera at 15 fps when the format supports
+  it (configured after the input is attached, so the check uses the session's
+  final format), and scopes each sample-buffer callback in an autorelease pool.
+  A `waitForCallbacks()` barrier lets the pipeline drain the last in-flight
+  frame without a late frame slipping in behind it.
+- `VisionLandmarkExtractor` scopes each request/handler in an autorelease pool
+  and copies only plain landmark values out, so no Vision observation survives
+  the frame.
+- `DetectionPipeline` coalesces main-queue delivery at ~30 Hz instead of one
+  dispatch block per frame. The flush timer is cancellable, and pending
+  deliveries are drained at burst end as well as on shutdown so the last batch
+  is never dropped by the monitor's burst gate.
+- `EyeMetrics` finds eye-contour extrema in one pass and reuses a single small
+  buffer for the interior points, instead of allocating four temporary arrays
+  per eye per frame.
+
+A 150 s / 5 s run with the camera active on this machine showed RSS dropping
+from ~220 MB baseline / ~248 MB burst peak (footprint 136 MB, peak 318 MB) to
+~129–152 MB baseline / ~180 MB peak (footprint 93 MB, peak 268 MB). A fresh
+launch without the debug window also avoids retaining SwiftUI view state, so
+part of the baseline drop is launch-condition dependent. These changes reduce
+hot-path churn but do not make the < 50 MB RSS budget achievable while macOS
+counts shared AppKit/SwiftUI/Vision framework pages in RSS.
+
+These figures predate the `EyeMetrics` allocation change; a camera-active
+re-measure is pending because the ad-hoc rebuild invalidated this machine's
+camera permission for Blinko.
+
 ## Run
 
 ```sh

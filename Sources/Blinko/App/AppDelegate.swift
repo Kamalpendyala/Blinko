@@ -630,14 +630,16 @@ extension AppDelegate: DetectionPipelineDelegate {
     }
 
     func detectionPipelineDidFinishReplay(_ pipeline: DetectionPipeline) {
+        // The replay source is done. Flush the final coalesced batch before
+        // reading the debug counters, otherwise a fast replay can finish ahead
+        // of the 30 Hz hand-off and report a zero/partial summary.
+        pipeline.shutdown()
         let model = debugModel
         let frames = model?.framesSeen ?? 0
         let blinks = model?.blinkCount ?? 0
         let baseline = pipeline.detector.baseline.map { String(format: "%.3f", $0) } ?? "n/a"
         log("replay finished: frames=\(frames) blinks=\(blinks) baseline=\(baseline)")
 
-        // The replay source is done; close any recorder it was writing.
-        pipeline.shutdown()
         replayPipeline = nil
 
         if options.exitAfterReplay {

@@ -45,9 +45,11 @@ while (( elapsed < duration )); do
 
     rss_kb="$(ps -o rss= -p "$pid" | awk '{ print $1 }')"
     cpu_lifetime="$(ps -o %cpu= -p "$pid" | awk '{ gsub(/%/, "", $1); print $1 }')"
+    # Do not exit early here: awk closing the pipe would give `top` SIGPIPE,
+    # and with `set -o pipefail` that would abort the whole script.
     top_line="$(
         top -l 2 -n 1 -pid "$pid" -stats pid,cpu,mem,command \
-            | awk '/^PID/ { header = 1; next } header && NF >= 3 { print; exit }'
+            | awk '/^PID/ { header = 1; next } header && NF >= 3 && !printed { print; printed = 1 }'
     )"
     cpu_sample="$(printf '%s\n' "$top_line" | awk '{ gsub(/%/, "", $2); print $2 }')"
 

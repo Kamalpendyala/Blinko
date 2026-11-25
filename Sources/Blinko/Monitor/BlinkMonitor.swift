@@ -686,6 +686,10 @@ final class BlinkMonitor {
         }
         stopHeartbeat()
         pipeline?.stopCamera()
+        // Deliver the final coalesced batch while the burst is still open.
+        // Otherwise the 30 Hz hand-off lands after `isBursting` flips false and
+        // `ingest` drops those samples and blinks.
+        pipeline?.drainPendingDeliveries()
         finishBurst(at: now)
         gapPolicy.reset()
         lastValidFaceAt = nil

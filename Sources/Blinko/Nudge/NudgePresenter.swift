@@ -8,6 +8,7 @@ final class NudgePresenter {
     private var dismissWorkItem: DispatchWorkItem?
     private var autoDismissSeconds: Double = 2.5
     private(set) var isVisible = false
+    private(set) var currentReason: NudgeReason?
 
     func present(
         reason: NudgeReason,
@@ -19,6 +20,7 @@ final class NudgePresenter {
         let panel = panel ?? NudgePanel()
         self.panel = panel
         self.autoDismissSeconds = autoDismissSeconds
+        self.currentReason = reason
         panel.update(reason: reason)
         panel.positionOnActiveScreen()
         panel.show()
@@ -32,12 +34,21 @@ final class NudgePresenter {
     }
 
     /// Applies a new duration. If a card is visible, its pending dismissal is
-    /// restarted with the new value; zero means "wait for a blink".
+    /// restarted with the new value; zero means "wait for a blink". An eye-break
+    /// card keeps its own rest duration and is never shortened by this.
     func setAutoDismissSeconds(_ seconds: Double) {
         assert(Thread.isMainThread)
         autoDismissSeconds = seconds
-        guard isVisible else { return }
+        guard isVisible, currentReason != .eyeBreak else { return }
         scheduleAutoDismiss()
+    }
+
+    /// A blink dismisses a blink reminder but not a 20-20-20 break: only the
+    /// rest timer (or the user) ends a break.
+    func dismissOnBlink() {
+        assert(Thread.isMainThread)
+        guard currentReason != .eyeBreak else { return }
+        dismiss()
     }
 
     func dismiss() {
@@ -45,6 +56,7 @@ final class NudgePresenter {
         dismissWorkItem?.cancel()
         dismissWorkItem = nil
         isVisible = false
+        currentReason = nil
         panel?.hide()
     }
 

@@ -27,7 +27,8 @@ public enum NudgeReason: Equatable {
     case noBlink
     /// Smoothed blink rate stayed below the threshold (retained for Phase C).
     case lowRate
-    case timedFallback
+    /// The camera-independent 20-20-20 break timer.
+    case eyeBreak
 }
 
 public enum NudgeDecision: Equatable {
@@ -49,29 +50,24 @@ public struct NudgePolicyConfig: Equatable {
     /// Maximum nudges inside `hourWindow`.
     public var maxNudgesPerHour: Int
     public var hourWindow: TimeInterval
-    /// Fixed interval for the camera-denied fallback (20-20-20 style).
-    public var fallbackInterval: TimeInterval
 
     public init(
         lowRateThreshold: Double = 8,
         lowBurstsRequired: Int = 3,
         cooldown: TimeInterval = 10 * 60,
         maxNudgesPerHour: Int = 3,
-        hourWindow: TimeInterval = 60 * 60,
-        fallbackInterval: TimeInterval = 20 * 60
+        hourWindow: TimeInterval = 60 * 60
     ) {
         precondition(lowRateThreshold > 0)
         precondition(lowBurstsRequired > 0)
         precondition(cooldown >= 0)
         precondition(maxNudgesPerHour > 0)
         precondition(hourWindow > 0)
-        precondition(fallbackInterval > 0)
         self.lowRateThreshold = lowRateThreshold
         self.lowBurstsRequired = lowBurstsRequired
         self.cooldown = cooldown
         self.maxNudgesPerHour = maxNudgesPerHour
         self.hourWindow = hourWindow
-        self.fallbackInterval = fallbackInterval
     }
 }
 
@@ -87,7 +83,6 @@ public final class NudgePolicy {
     public private(set) var lastNudgeAt: TimeInterval?
 
     private var nudgeTimestamps: [TimeInterval] = []
-    private var fallbackNextDue: TimeInterval?
 
     public init(config: NudgePolicyConfig = NudgePolicyConfig()) {
         self.config = config
@@ -131,51 +126,6 @@ public final class NudgePolicy {
         return .nudge(.lowRate)
     }
 
-    // MARK: - Camera-denied fallback
-
-    /// Starts the fixed-interval fallback clock. The first reminder is due one
-    /// full interval later, so enabling fallback never nags immediately.
-    public func beginFallback(at now: TimeInterval) {
-        fallbackNextDue = now + config.fallbackInterval
-    }
-
-    public func stopFallback() {
-        fallbackNextDue = nil
-    }
-
-    /// Evaluates the fixed-interval fallback. Overdue reminders are skipped and
-    /// rescheduled rather than fired in a burst after sleep or suppression.
-    @discardableResult
-    public func evaluateFallback(
-        now: TimeInterval,
-        enabled: Bool,
-        cameraUnavailable: Bool,
-        suppression: NudgeSuppression = []
-    ) -> NudgeDecision {
-        guard enabled, cameraUnavailable else {
-            fallbackNextDue = nil
-            return .none
-        }
-
-        guard suppression.isEmpty else {
-            if let due = fallbackNextDue, now >= due {
-                fallbackNextDue = now + config.fallbackInterval
-            }
-            return .suppressed(suppression)
-        }
-
-        guard let due = fallbackNextDue else {
-            fallbackNextDue = now + config.fallbackInterval
-            return .none
-        }
-
-        guard now >= due else { return .none }
-
-        fallbackNextDue = now + config.fallbackInterval
-        nudgeCount += 1
-        return .nudge(.timedFallback)
-    }
-
     public func resetLowStreak() {
         lowStreak = 0
     }
@@ -185,6 +135,5 @@ public final class NudgePolicy {
         nudgeCount = 0
         lastNudgeAt = nil
         nudgeTimestamps.removeAll()
-        fallbackNextDue = nil
     }
 }

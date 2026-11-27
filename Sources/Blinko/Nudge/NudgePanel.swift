@@ -102,9 +102,10 @@ final class NudgePanel: NSPanel {
             titleLabel.stringValue = "Blink"
             subtitleLabel.stringValue = "You have blinked less than usual."
             apply(accent: .systemBlue)
-        case .timedFallback:
+        case .eyeBreak:
             titleLabel.stringValue = "Look away"
-            subtitleLabel.stringValue = "20-20-20: rest your eyes for 20 seconds."
+            subtitleLabel.stringValue =
+                "20-20-20: focus on something ~20 feet away for 20 seconds."
             apply(accent: .systemTeal)
         }
     }

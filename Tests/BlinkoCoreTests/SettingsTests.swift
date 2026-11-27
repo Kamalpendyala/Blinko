@@ -13,6 +13,9 @@ struct SettingsTests {
         #expect(settings.intervalSeconds == 60)
         #expect(settings.idleThresholdSeconds == 300)
         #expect(settings.lowBatteryThreshold == 0.20)
+        #expect(settings.eyeBreaksEnabled)
+        #expect(settings.eyeBreakIntervalSeconds == 1_200)
+        #expect(settings.eyeBreakRestSeconds == 20)
     }
 
     @Test("Adjustable intervals survive a JSON round-trip")
@@ -24,6 +27,9 @@ struct SettingsTests {
         settings.intervalSeconds = 45
         settings.idleThresholdSeconds = 120
         settings.lowBatteryThreshold = 0.3
+        settings.eyeBreaksEnabled = false
+        settings.eyeBreakIntervalSeconds = 900
+        settings.eyeBreakRestSeconds = 30
 
         let data = try JSONEncoder().encode(settings)
         let decoded = try JSONDecoder().decode(Settings.self, from: data)
@@ -32,6 +38,9 @@ struct SettingsTests {
         #expect(decoded.autoDismissSeconds == 0)
         #expect(decoded.burstSeconds == 8)
         #expect(decoded.idleThresholdSeconds == 120)
+        #expect(decoded.eyeBreaksEnabled == false)
+        #expect(decoded.eyeBreakIntervalSeconds == 900)
+        #expect(decoded.eyeBreakRestSeconds == 30)
     }
 
     @Test("Phase D settings fields survive a JSON round-trip")
@@ -49,8 +58,9 @@ struct SettingsTests {
         #expect(decoded.calibrationBaseline == 0.31)
     }
 
-    @Test("Older settings JSON without Phase D keys still decodes")
+    @Test("Older settings JSON without Phase D/E keys still decodes")
     func olderJSONDecodes() throws {
+        // Keeps the retired fallbackRemindersEnabled key to prove it is ignored.
         let legacy = """
         {
           "paused": false,
@@ -80,6 +90,10 @@ struct SettingsTests {
         #expect(decoded.noBlinkInterval == 7)
         #expect(decoded.launchAtLogin == false)
         #expect(decoded.calibrationBaseline == nil)
+        // Phase E keys are absent from the old file and default to on.
+        #expect(decoded.eyeBreaksEnabled)
+        #expect(decoded.eyeBreakIntervalSeconds == 1_200)
+        #expect(decoded.eyeBreakRestSeconds == 20)
     }
 
     @Test("Invalid values produce field-specific reasons")
@@ -93,6 +107,8 @@ struct SettingsTests {
         settings.lowBatteryThreshold = 1
         settings.quietHours.startHour = 24
         settings.calibrationBaseline = 2
+        settings.eyeBreakIntervalSeconds = 30
+        settings.eyeBreakRestSeconds = 1
 
         let fields = Set(settings.validationIssues().map(\.field))
         #expect(fields.contains(.burstSeconds))
@@ -103,6 +119,8 @@ struct SettingsTests {
         #expect(fields.contains(.lowBatteryThreshold))
         #expect(fields.contains(.quietHours))
         #expect(fields.contains(.calibrationBaseline))
+        #expect(fields.contains(.eyeBreakIntervalSeconds))
+        #expect(fields.contains(.eyeBreakRestSeconds))
     }
 
     @Test("Default settings are valid")

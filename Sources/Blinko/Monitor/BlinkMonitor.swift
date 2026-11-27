@@ -7,7 +7,6 @@ struct MonitorSnapshot: Equatable {
     var isRunning: Bool
     var isPaused: Bool
     var cameraDenied: Bool
-    var fallbackEnabled: Bool
     var quietHoursEnabled: Bool
     var quietHoursActive: Bool
     var facePresent: Bool
@@ -28,6 +27,13 @@ struct MonitorSnapshot: Equatable {
     var burstSeconds: Double
     var intervalSeconds: Double
     var suppression: NudgeSuppression
+
+    // Phase E: camera-independent 20-20-20 breaks.
+    var eyeBreaksEnabled: Bool
+    var eyeBreakIntervalSeconds: Double
+    var eyeBreakRestSeconds: Double
+    var nextEyeBreakAt: TimeInterval?
+    var isEyeBreaking: Bool
 }
 
 /// State of the guided calibration flow shown in Settings.
@@ -70,6 +76,10 @@ final class BlinkMonitor {
     var onError: ((FrameSourceError) -> Void)?
     /// Called when the system suspends sampling (sleep, lock, session switch).
     var onSystemSuspend: (() -> Void)?
+    /// Called when a 20-20-20 card should be hidden: its rest ended normally,
+    /// or the cadence was abandoned (pause, stop, system suspend, disabled).
+    /// Lets the presenter avoid owning a second timer for the same interval.
+    var onEyeBreakCardEnded: (() -> Void)?
     /// Called whenever a setting changes, so the app can persist it.
     var onSettingsChanged: ((Settings) -> Void)?
     /// Called after a completed burst with aggregate-only values.
@@ -94,13 +104,14 @@ final class BlinkMonitor {
     private let nudgePolicy = NudgePolicy()
     private let burst = BurstAccumulator()
     private let gapPolicy: BlinkGapPolicy
+    private var eyeBreakTimer: EyeBreakTimer
     private var scheduler: SamplingScheduler
 
     private var pipeline: DetectionPipeline?
     private var recorder: LandmarkCSVRecorder?
     private var scheduleTimer: Timer?
     private var heartbeatTimer: Timer?
-    private var fallbackTimer: Timer?
+    private var eyeBreakWakeTimer: Timer?
 
     private var status = "Starting…"
     private var lastSnapshot: MonitorSnapshot?
@@ -140,6 +151,13 @@ final class BlinkMonitor {
         self.gapPolicy = BlinkGapPolicy(
             config: BlinkGapPolicyConfig(interval: settings.noBlinkInterval)
         )
+        self.eyeBreakTimer = EyeBreakTimer(
+            config: EyeBreakTimerConfig(
+                enabled: settings.eyeBreaksEnabled,
+                interval: settings.eyeBreakIntervalSeconds,
+                restSeconds: settings.eyeBreakRestSeconds
+            )
+        )
         self.scheduler = SamplingScheduler(
             config: SamplingSchedulerConfig(
                 burstSeconds: settings.burstSeconds,
@@ -174,6 +192,9 @@ final class BlinkMonitor {
         activity.end()
         cancelTimers()
         resetCalibrationState(notify: false)
+        eyeBreakTimer.reset()
+        eyeBreakTimer.start(at: clock.monotonicNow)
+        scheduleEyeBreakEvaluation()
 
         scheduler = SamplingScheduler(
             config: SamplingSchedulerConfig(
@@ -220,8 +241,10 @@ final class BlinkMonitor {
         pipeline = nil
         recorder = nil
         burst.reset()
-        nudgePolicy.stopFallback()
         gapPolicy.reset()
+        abandonEyeBreakRestIfNeeded()
+        stopEyeBreakTimer()
+        eyeBreakTimer.reset()
         lastValidFaceAt = nil
         publish()
     }
@@ -243,8 +266,10 @@ final class BlinkMonitor {
         pipeline?.stopCamera()
         burst.reset()
         nudgePolicy.resetLowStreak()
-        nudgePolicy.stopFallback()
         gapPolicy.reset()
+        abandonEyeBreakRestIfNeeded()
+        stopEyeBreakTimer()
+        eyeBreakTimer.reset()
         lastValidFaceAt = nil
         setStatus("Paused — camera off, no reminders.")
         publish()
@@ -266,15 +291,13 @@ final class BlinkMonitor {
         burst.reset()
         gapPolicy.reset()
         lastValidFaceAt = nil
+        eyeBreakTimer.start(at: clock.monotonicNow)
+        scheduleEyeBreakEvaluation()
 
         if cameraDenied {
-            if settings.fallbackRemindersEnabled {
-                nudgePolicy.beginFallback(at: clock.monotonicNow)
-                setStatus("Camera unavailable — timed reminders on.")
-                startFallbackTimerIfNeeded()
-            } else {
-                setStatus("Camera access denied. Enable timed reminders from the menu.")
-            }
+            setStatus(settings.eyeBreaksEnabled
+                ? "Camera unavailable — 20-20-20 breaks on."
+                : "Camera access denied. Enable Blinko in System Settings › Privacy & Security › Camera.")
             publish()
             return
         }
@@ -288,8 +311,6 @@ final class BlinkMonitor {
         guard isRunning, !isPaused else { return }
 
         cameraDenied = false
-        nudgePolicy.stopFallback()
-        stopFallbackTimer()
         gapPolicy.reset()
         lastValidFaceAt = nil
         scheduler.start(at: clock.monotonicNow, immediateBurst: true)
@@ -306,19 +327,55 @@ final class BlinkMonitor {
         evaluateSchedule(ignoringGate: true)
     }
 
-    func setFallbackRemindersEnabled(_ enabled: Bool) {
+    func setEyeBreaksEnabled(_ enabled: Bool) {
         assert(Thread.isMainThread)
-        guard settings.fallbackRemindersEnabled != enabled else { return }
-        settings.fallbackRemindersEnabled = enabled
-
-        if enabled, cameraDenied, !isPaused {
-            nudgePolicy.beginFallback(at: clock.monotonicNow)
-            startFallbackTimerIfNeeded()
-        } else if !enabled {
-            nudgePolicy.stopFallback()
-            stopFallbackTimer()
+        guard settings.eyeBreaksEnabled != enabled else { return }
+        settings.eyeBreaksEnabled = enabled
+        if !enabled { abandonEyeBreakRestIfNeeded() }
+        eyeBreakTimer.setEnabled(enabled, at: clock.monotonicNow)
+        if enabled {
+            scheduleEyeBreakEvaluation()
+        } else {
+            stopEyeBreakTimer()
         }
         settingsDidChange()
+        publish()
+    }
+
+    /// Updates the 20-20-20 cadence and re-arms from now.
+    func setEyeBreakInterval(_ seconds: Double) {
+        assert(Thread.isMainThread)
+        let interval = min(3600, max(60, seconds))
+        guard settings.eyeBreakIntervalSeconds != interval else { return }
+        settings.eyeBreakIntervalSeconds = interval
+        eyeBreakTimer.setInterval(interval, at: clock.monotonicNow)
+        scheduleEyeBreakEvaluation()
+        settingsDidChange()
+        publish()
+    }
+
+    /// Updates how long the look-away card stays up.
+    func setEyeBreakRestSeconds(_ seconds: Double) {
+        assert(Thread.isMainThread)
+        let rest = min(120, max(5, seconds))
+        guard settings.eyeBreakRestSeconds != rest else { return }
+        settings.eyeBreakRestSeconds = rest
+        eyeBreakTimer.setRestSeconds(rest, at: clock.monotonicNow)
+        // A shorter rest can move restEndsAt earlier; re-arm so the card is
+        // hidden at the new deadline instead of the old one.
+        scheduleEyeBreakEvaluation()
+        settingsDidChange()
+        publish()
+    }
+
+    /// Menu action: start a break now and reset the automatic cadence.
+    func takeEyeBreakNow() {
+        assert(Thread.isMainThread)
+        guard isRunning, !isPaused else { return }
+        if case .beginRest = eyeBreakTimer.beginNow(at: clock.monotonicNow) {
+            deliverNudge(.eyeBreak)
+        }
+        scheduleEyeBreakEvaluation()
         publish()
     }
 
@@ -449,20 +506,31 @@ final class BlinkMonitor {
                 }
             }
 
-            if newSettings.fallbackRemindersEnabled != previous.fallbackRemindersEnabled {
-                if newSettings.fallbackRemindersEnabled, cameraDenied {
-                    nudgePolicy.beginFallback(at: clock.monotonicNow)
-                    startFallbackTimerIfNeeded()
-                } else if !newSettings.fallbackRemindersEnabled {
-                    nudgePolicy.stopFallback()
-                    stopFallbackTimer()
-                }
-            }
-
             if isRunning, !cameraDenied {
                 scheduleNextEvaluation()
             }
         }
+
+        if newSettings.eyeBreaksEnabled != previous.eyeBreaksEnabled {
+            if !newSettings.eyeBreaksEnabled { abandonEyeBreakRestIfNeeded() }
+            eyeBreakTimer.setEnabled(newSettings.eyeBreaksEnabled, at: clock.monotonicNow)
+            if !newSettings.eyeBreaksEnabled {
+                stopEyeBreakTimer()
+            }
+        }
+        if newSettings.eyeBreakIntervalSeconds != previous.eyeBreakIntervalSeconds {
+            eyeBreakTimer.setInterval(
+                newSettings.eyeBreakIntervalSeconds,
+                at: clock.monotonicNow
+            )
+        }
+        if newSettings.eyeBreakRestSeconds != previous.eyeBreakRestSeconds {
+            eyeBreakTimer.setRestSeconds(
+                newSettings.eyeBreakRestSeconds,
+                at: clock.monotonicNow
+            )
+        }
+        scheduleEyeBreakEvaluation()
 
         settingsDidChange()
         publish()
@@ -627,13 +695,10 @@ final class BlinkMonitor {
             pipeline?.stopCamera()
         }
         burst.reset()
-        nudgePolicy.stopFallback()
         gapPolicy.reset()
         lastValidFaceAt = nil
-        if settings.fallbackRemindersEnabled {
-            nudgePolicy.beginFallback(at: clock.monotonicNow)
-            startFallbackTimerIfNeeded()
-        }
+        // Eye breaks are independent of the camera, so keep them armed.
+        scheduleEyeBreakEvaluation()
         setStatus(message)
         publish()
     }
@@ -686,6 +751,10 @@ final class BlinkMonitor {
         }
         stopHeartbeat()
         pipeline?.stopCamera()
+        // Deliver the final coalesced batch while the burst is still open.
+        // Otherwise the 30 Hz hand-off lands after `isBursting` flips false and
+        // `ingest` drops those samples and blinks.
+        pipeline?.drainPendingDeliveries()
         finishBurst(at: now)
         gapPolicy.reset()
         lastValidFaceAt = nil
@@ -734,7 +803,6 @@ final class BlinkMonitor {
         scheduleTimer?.invalidate()
         scheduleTimer = nil
         stopHeartbeat()
-        stopFallbackTimer()
     }
 
     // MARK: - Detection input
@@ -802,44 +870,56 @@ final class BlinkMonitor {
         publishIfChanged()
     }
 
-    // MARK: - Camera-denied fallback
+    // MARK: - 20-20-20 eye breaks
 
-    private func startFallbackTimerIfNeeded() {
-        guard isRunning, !isPaused, cameraDenied, settings.fallbackRemindersEnabled else {
-            stopFallbackTimer()
-            return
-        }
-        guard fallbackTimer == nil else { return }
+    /// Arms one tolerant one-shot timer at the next eye-break deadline. No
+    /// per-second polling runs between breaks.
+    private func scheduleEyeBreakEvaluation() {
+        stopEyeBreakTimer()
+        guard isRunning, !isPaused, !isSystemBlocked else { return }
+        guard let deadline = eyeBreakTimer.nextDeadline() else { return }
 
-        let timer = Timer(timeInterval: 5, repeats: true) { [weak self] _ in
-            self?.heartbeatFallback()
+        let delay = max(0.05, deadline - clock.monotonicNow)
+        let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
+            self?.eyeBreakHeartbeat()
         }
-        timer.tolerance = 1
+        timer.tolerance = min(30, max(0.1, delay * 0.1))
         RunLoop.main.add(timer, forMode: .common)
-        fallbackTimer = timer
+        eyeBreakWakeTimer = timer
     }
 
-    private func stopFallbackTimer() {
-        fallbackTimer?.invalidate()
-        fallbackTimer = nil
+    private func stopEyeBreakTimer() {
+        eyeBreakWakeTimer?.invalidate()
+        eyeBreakWakeTimer = nil
     }
 
-    private func heartbeatFallback() {
-        guard isRunning, !isPaused, cameraDenied, settings.fallbackRemindersEnabled else {
-            stopFallbackTimer()
-            return
-        }
+    /// A rest can be abandoned without its deadline firing (pause, stop,
+    /// system suspend or breaks disabled). Notify the UI so the card does not
+    /// outlive the rest now that the presenter owns no timer for it.
+    private func abandonEyeBreakRestIfNeeded() {
+        guard eyeBreakTimer.isResting else { return }
+        onEyeBreakCardEnded?()
+    }
+
+    private func eyeBreakHeartbeat() {
+        guard isRunning, !isPaused else { return }
 
         let now = clock.monotonicNow
-        let decision = nudgePolicy.evaluateFallback(
+        let decision = eyeBreakTimer.evaluate(
             now: now,
-            enabled: true,
-            cameraUnavailable: true,
             suppression: currentSuppression(now: now, includeCameraUnavailable: false)
         )
-        if case let .nudge(reason) = decision {
-            deliverNudge(reason)
+        switch decision {
+        case .beginRest:
+            deliverNudge(.eyeBreak)
+        case .endRest:
+            // The presenter does not run a second timer for eye breaks; the
+            // monitor's rest deadline is the single source of truth.
+            onEyeBreakCardEnded?()
+        case .none, .suppressed:
+            break
         }
+        scheduleEyeBreakEvaluation()
         publishIfChanged()
     }
 
@@ -884,6 +964,9 @@ final class BlinkMonitor {
 
     private func suspendForSystem(reason: String) {
         cancelTimers()
+        abandonEyeBreakRestIfNeeded()
+        stopEyeBreakTimer()
+        eyeBreakTimer.reset()
         stopCurrentBurst()
         scheduler.suspend(at: clock.monotonicNow)
         pipeline?.stopCamera()
@@ -896,7 +979,17 @@ final class BlinkMonitor {
     }
 
     private func resumeFromSystem(at now: TimeInterval, asleepFor duration: TimeInterval) {
-        guard isRunning, !isPaused, !cameraDenied, !isSystemBlocked else {
+        guard isRunning, !isPaused, !isSystemBlocked else {
+            publish()
+            return
+        }
+
+        // Eye breaks work even when the camera is denied, so re-arm them before
+        // the camera-specific resume path.
+        eyeBreakTimer.start(at: now)
+        scheduleEyeBreakEvaluation()
+
+        guard !cameraDenied else {
             publish()
             return
         }
@@ -963,8 +1056,8 @@ final class BlinkMonitor {
             setStatus("Nudged: no blink for \(Int(settings.noBlinkInterval)) s.")
         case .lowRate:
             setStatus("Nudged: blink rate stayed low.")
-        case .timedFallback:
-            setStatus("Nudged: timed reminder.")
+        case .eyeBreak:
+            setStatus("Nudged: 20-20-20 eye break.")
         }
         onNudge?(reason)
         publish()
@@ -982,7 +1075,6 @@ final class BlinkMonitor {
             isRunning: isRunning,
             isPaused: isPaused,
             cameraDenied: cameraDenied,
-            fallbackEnabled: settings.fallbackRemindersEnabled,
             quietHoursEnabled: settings.quietHours.enabled,
             quietHoursActive: settings.quietHours.isActive(at: clock.now),
             facePresent: lastValidFaceAt.map { now - $0 <= 2 } ?? false,
@@ -1000,7 +1092,12 @@ final class BlinkMonitor {
             burstEndsAt: scheduler.burstEndsAt,
             burstSeconds: settings.burstSeconds,
             intervalSeconds: settings.intervalSeconds,
-            suppression: currentSuppression(now: now, includeCameraUnavailable: false)
+            suppression: currentSuppression(now: now, includeCameraUnavailable: false),
+            eyeBreaksEnabled: settings.eyeBreaksEnabled,
+            eyeBreakIntervalSeconds: settings.eyeBreakIntervalSeconds,
+            eyeBreakRestSeconds: settings.eyeBreakRestSeconds,
+            nextEyeBreakAt: eyeBreakTimer.nextBreakAt,
+            isEyeBreaking: eyeBreakTimer.isResting
         )
     }
 

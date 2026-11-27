@@ -207,6 +207,8 @@ struct PersistenceTests {
         invalid.burstSeconds = 1
         invalid.intervalSeconds = 0.5
         invalid.lowBatteryThreshold = 2
+        invalid.eyeBreakIntervalSeconds = 30
+        invalid.eyeBreakRestSeconds = 1
 
         do {
             try store.saveSettings(invalid)
@@ -215,6 +217,8 @@ struct PersistenceTests {
             #expect(issues.contains { $0.field == .burstSeconds })
             #expect(issues.contains { $0.field == .intervalSeconds })
             #expect(issues.contains { $0.field == .lowBatteryThreshold })
+            #expect(issues.contains { $0.field == .eyeBreakIntervalSeconds })
+            #expect(issues.contains { $0.field == .eyeBreakRestSeconds })
             #expect(issues.allSatisfy { !$0.message.isEmpty })
         }
 

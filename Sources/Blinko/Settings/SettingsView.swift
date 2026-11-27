@@ -9,6 +9,7 @@ struct SettingsView: View {
             generalSection
             samplingSection
             reminderSection
+            eyeBreakSection
             calibrationSection
             dataSection
             saveSection
@@ -165,11 +166,6 @@ struct SettingsView: View {
             }
             errorText(.autoDismissSeconds)
 
-            Toggle(
-                "Offer timed reminders when the camera is unavailable",
-                isOn: $model.draft.fallbackRemindersEnabled
-            )
-
             Toggle("Quiet hours", isOn: $model.draft.quietHours.enabled)
             if model.draft.quietHours.enabled {
                 DatePicker(
@@ -184,6 +180,54 @@ struct SettingsView: View {
                 )
             }
             errorText(.quietHours)
+        }
+    }
+
+    private var eyeBreakSection: some View {
+        Section("20-20-20 Breaks") {
+            Toggle("Enable 20-20-20 eye breaks", isOn: $model.draft.eyeBreaksEnabled)
+
+            Text(
+                "Every 20 minutes, Blinko asks you to look at something about 20 feet "
+                + "away for 20 seconds. This works even when the camera is unavailable."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+
+            LabeledContent("Break every") {
+                HStack(spacing: 6) {
+                    TextField(
+                        "Break interval",
+                        value: Binding(
+                            get: { model.draft.eyeBreakIntervalSeconds / 60 },
+                            set: { model.draft.eyeBreakIntervalSeconds = $0 * 60 }
+                        ),
+                        format: .number.precision(.fractionLength(0))
+                    )
+                    .labelsHidden()
+                    .frame(width: 72)
+                    .multilineTextAlignment(.trailing)
+                    Text("minutes")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            errorText(.eyeBreakIntervalSeconds)
+
+            LabeledContent("Rest for") {
+                HStack(spacing: 6) {
+                    TextField(
+                        "Rest duration",
+                        value: $model.draft.eyeBreakRestSeconds,
+                        format: .number.precision(.fractionLength(0))
+                    )
+                    .labelsHidden()
+                    .frame(width: 72)
+                    .multilineTextAlignment(.trailing)
+                    Text("seconds")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            errorText(.eyeBreakRestSeconds)
         }
     }
 

@@ -33,6 +33,20 @@ final class DetectionPipeline {
     private let busyLock = NSLock()
     private var busy = false
 
+    /// Frames arrive at the camera rate; SwiftUI only needs ~30 Hz. Batching the
+    /// main-queue hand-off avoids one dispatch block per frame without dropping
+    /// samples from the detector or the debug plot.
+    private struct Delivery {
+        let sample: EyeSample
+        let detector: DetectorSample
+        let blink: BlinkEvent?
+    }
+
+    private let deliveryLock = NSLock()
+    private var pendingDeliveries: [Delivery] = []
+    private var deliveryWork: DispatchWorkItem?
+    private let deliveryInterval: TimeInterval = 1.0 / 30.0
+
     init(
         extractor: LandmarkExtractor = VisionLandmarkExtractor(),
         metrics: EyeMetrics = EyeMetrics(),
@@ -127,8 +141,19 @@ final class DetectionPipeline {
         stopReplay()
     }
 
+    /// Waits for every frame already in flight and delivers the rest of the
+    /// batch synchronously. Called at burst end, before the monitor closes its
+    /// burst, so no sample or blink is lost to the 30 Hz hand-off.
+    func drainPendingDeliveries() {
+        assert(Thread.isMainThread)
+        camera?.waitForCallbacks()
+        processingQueue.sync { }
+        flushDeliveries()
+    }
+
     func shutdown() {
         stop()
+        if Thread.isMainThread { drainPendingDeliveries() }
         camera = nil
         recorder?.close()
     }
@@ -146,8 +171,10 @@ final class DetectionPipeline {
 
         processingQueue.async { [weak self] in
             guard let self else { return }
-            let observation = self.extractor.extract(from: frame)
-            self.handle(observation)
+            autoreleasepool {
+                let observation = self.extractor.extract(from: frame)
+                self.handle(observation)
+            }
             self.busyLock.lock()
             self.busy = false
             self.busyLock.unlock()
@@ -169,11 +196,40 @@ final class DetectionPipeline {
             phase: detector.phase
         )
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.delegate?.detectionPipeline(self, didProduce: sample, detector: snapshot)
-            if let event {
-                self.delegate?.detectionPipeline(self, didDetect: event)
+        deliveryLock.lock()
+        pendingDeliveries.append(Delivery(sample: sample, detector: snapshot, blink: event))
+        let shouldSchedule = deliveryWork == nil
+        var work: DispatchWorkItem?
+        if shouldSchedule {
+            let item = DispatchWorkItem { [weak self] in
+                self?.flushDeliveries()
+            }
+            deliveryWork = item
+            work = item
+        }
+        deliveryLock.unlock()
+
+        if let work {
+            DispatchQueue.main.asyncAfter(deadline: .now() + deliveryInterval, execute: work)
+        }
+    }
+
+    /// Drains all samples accumulated since the previous hand-off in one main
+    /// queue block, preserving sample-then-blink order. Cancel the pending timer
+    /// so a stale batch cannot drain a later burst's deliveries early.
+    private func flushDeliveries() {
+        deliveryLock.lock()
+        let batch = pendingDeliveries
+        pendingDeliveries.removeAll(keepingCapacity: true)
+        let work = deliveryWork
+        deliveryWork = nil
+        deliveryLock.unlock()
+        work?.cancel()
+
+        for delivery in batch {
+            delegate?.detectionPipeline(self, didProduce: delivery.sample, detector: delivery.detector)
+            if let blink = delivery.blink {
+                delegate?.detectionPipeline(self, didDetect: blink)
             }
         }
     }

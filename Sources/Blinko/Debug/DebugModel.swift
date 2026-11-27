@@ -49,9 +49,17 @@ final class DebugModel: ObservableObject {
     @Published private(set) var burstElapsed: Double?
     @Published private(set) var suppression: NudgeSuppression = []
 
+    // Phase E: 20-20-20 break readouts.
+    @Published private(set) var eyeBreaksEnabled = true
+    @Published private(set) var eyeBreakIntervalSeconds: Double = 20 * 60
+    @Published private(set) var eyeBreakRestSeconds: Double = 20
+    @Published private(set) var isEyeBreaking = false
+    @Published private(set) var secondsUntilEyeBreak: Double?
+
     private let clock: Clock
     private var nextBurstAt: TimeInterval?
     private var burstEndsAt: TimeInterval?
+    private var nextEyeBreakAt: TimeInterval?
     private var pending: [PlotSample] = []
     private var nextID = 0
     private var validCount = 0
@@ -148,7 +156,22 @@ final class DebugModel: ObservableObject {
         nextBurstAt = monitor.nextBurstAt
         burstEndsAt = monitor.burstEndsAt
         suppression = monitor.suppression
+        setIfChanged(\.eyeBreaksEnabled, monitor.eyeBreaksEnabled)
+        setIfChanged(\.eyeBreakIntervalSeconds, monitor.eyeBreakIntervalSeconds)
+        setIfChanged(\.eyeBreakRestSeconds, monitor.eyeBreakRestSeconds)
+        nextEyeBreakAt = monitor.nextEyeBreakAt
+        setIfChanged(\.isEyeBreaking, monitor.isEyeBreaking)
         refreshCountdown()
+    }
+
+    /// `@Published` emits on every assignment, so skip no-op writes for the
+    /// eye-break readouts that rarely change.
+    private func setIfChanged<T: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<DebugModel, T>,
+        _ value: T
+    ) {
+        guard self[keyPath: keyPath] != value else { return }
+        self[keyPath: keyPath] = value
     }
 
     /// Drops live-monitor fields when switching to replay/diagnostic mode.
@@ -170,6 +193,10 @@ final class DebugModel: ObservableObject {
         suppression = []
         nextBurstAt = nil
         burstEndsAt = nil
+        eyeBreaksEnabled = true
+        isEyeBreaking = false
+        secondsUntilEyeBreak = nil
+        nextEyeBreakAt = nil
     }
 
     func resetCounters() {
@@ -219,6 +246,11 @@ final class DebugModel: ObservableObject {
             burstElapsed = max(0, burstSeconds - max(0, burstEndsAt - now))
         } else {
             burstElapsed = nil
+        }
+        if let nextEyeBreakAt {
+            secondsUntilEyeBreak = max(0, nextEyeBreakAt - now)
+        } else {
+            secondsUntilEyeBreak = nil
         }
     }
 }

@@ -40,6 +40,7 @@ struct DebugView: View {
             HStack(alignment: .firstTextBaseline, spacing: 26) {
                 metric("Sampling", samplingText())
                 metric("Duty", dutyText())
+                metric("Eye break", eyeBreakText())
                 if let reason = model.suppression.shortDescription {
                     Text("CAMERA OFF — \(reason.uppercased())")
                         .font(.caption.bold())
@@ -174,6 +175,14 @@ struct DebugView: View {
 
     private func dutyText() -> String {
         "\(secondsText(model.burstSeconds))s / \(secondsText(model.intervalSeconds))s"
+    }
+
+    private func eyeBreakText() -> String {
+        if model.isEyeBreaking { return "resting" }
+        guard model.eyeBreaksEnabled else { return "off" }
+        guard let remaining = model.secondsUntilEyeBreak else { return "on" }
+        let minutes = Int((remaining / 60).rounded(.up))
+        return minutes >= 1 ? "in \(minutes)m" : "in \(Int(remaining.rounded(.up)))s"
     }
 
     private func secondsText(_ value: Double) -> String {

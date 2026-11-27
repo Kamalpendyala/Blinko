@@ -108,38 +108,4 @@ struct NudgePolicyTests {
         )
     }
 
-    @Test("NP-07 camera denied plus fallback enabled fires on a fixed interval")
-    func np07Fallback() {
-        let policy = NudgePolicy()
-
-        policy.beginFallback(at: 0)
-        #expect(policy.evaluateFallback(now: 1_199, enabled: true, cameraUnavailable: true) == .none)
-        #expect(policy.evaluateFallback(now: 1_200, enabled: true, cameraUnavailable: true) == .nudge(.timedFallback))
-        #expect(policy.evaluateFallback(now: 2_399, enabled: true, cameraUnavailable: true) == .none)
-        #expect(policy.evaluateFallback(now: 2_400, enabled: true, cameraUnavailable: true) == .nudge(.timedFallback))
-
-        // Disabled fallback or a working camera never fires.
-        #expect(policy.evaluateFallback(now: 2_500, enabled: false, cameraUnavailable: true) == .none)
-        #expect(policy.evaluateFallback(now: 2_600, enabled: true, cameraUnavailable: false) == .none)
-    }
-
-    @Test("NP-07b a fallback that comes due while suppressed is rescheduled, not piled up")
-    func np07FallbackSuppressed() {
-        let policy = NudgePolicy()
-        policy.beginFallback(at: 0)
-
-        #expect(
-            policy.evaluateFallback(
-                now: 1_200,
-                enabled: true,
-                cameraUnavailable: true,
-                suppression: .paused
-            ) == .suppressed(.paused)
-        )
-
-        // The overdue reminder was skipped; the next one is a full interval away.
-        #expect(policy.evaluateFallback(now: 1_201, enabled: true, cameraUnavailable: true) == .none)
-        #expect(policy.evaluateFallback(now: 2_399, enabled: true, cameraUnavailable: true) == .none)
-        #expect(policy.evaluateFallback(now: 2_400, enabled: true, cameraUnavailable: true) == .nudge(.timedFallback))
-    }
 }

@@ -73,7 +73,12 @@ public struct Settings: Codable, Equatable {
     /// Skip bursts below this battery fraction while unplugged.
     public var lowBatteryThreshold: Double
     public var quietHours: QuietHours
-    public var fallbackRemindersEnabled: Bool
+    /// Camera-independent 20-20-20 breaks.
+    public var eyeBreaksEnabled: Bool
+    /// Seconds between breaks (default 20 minutes).
+    public var eyeBreakIntervalSeconds: Double
+    /// How long the look-away card stays up (default 20 seconds).
+    public var eyeBreakRestSeconds: Double
     public var soundEnabled: Bool
     /// Last requested login-item state. `SMAppService` remains the source of
     /// truth; this only remembers what the user asked for across launches.
@@ -92,7 +97,9 @@ public struct Settings: Codable, Equatable {
         lowBatteryThreshold: Double = 0.20,
         // Off for the current tuning build; the menu bar can turn it back on.
         quietHours: QuietHours = QuietHours(enabled: false),
-        fallbackRemindersEnabled: Bool = false,
+        eyeBreaksEnabled: Bool = true,
+        eyeBreakIntervalSeconds: Double = 20 * 60,
+        eyeBreakRestSeconds: Double = 20,
         soundEnabled: Bool = false,
         launchAtLogin: Bool = false,
         calibrationBaseline: Double? = nil,
@@ -106,7 +113,9 @@ public struct Settings: Codable, Equatable {
         self.idleThresholdSeconds = idleThresholdSeconds
         self.lowBatteryThreshold = lowBatteryThreshold
         self.quietHours = quietHours
-        self.fallbackRemindersEnabled = fallbackRemindersEnabled
+        self.eyeBreaksEnabled = eyeBreaksEnabled
+        self.eyeBreakIntervalSeconds = eyeBreakIntervalSeconds
+        self.eyeBreakRestSeconds = eyeBreakRestSeconds
         self.soundEnabled = soundEnabled
         self.launchAtLogin = launchAtLogin
         self.calibrationBaseline = calibrationBaseline
@@ -131,10 +140,16 @@ public struct Settings: Codable, Equatable {
             ?? defaults.lowBatteryThreshold
         quietHours = try container.decodeIfPresent(QuietHours.self, forKey: .quietHours)
             ?? defaults.quietHours
-        fallbackRemindersEnabled = try container.decodeIfPresent(
-            Bool.self,
-            forKey: .fallbackRemindersEnabled
-        ) ?? defaults.fallbackRemindersEnabled
+        eyeBreaksEnabled = try container.decodeIfPresent(Bool.self, forKey: .eyeBreaksEnabled)
+            ?? defaults.eyeBreaksEnabled
+        eyeBreakIntervalSeconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .eyeBreakIntervalSeconds
+        ) ?? defaults.eyeBreakIntervalSeconds
+        eyeBreakRestSeconds = try container.decodeIfPresent(
+            Double.self,
+            forKey: .eyeBreakRestSeconds
+        ) ?? defaults.eyeBreakRestSeconds
         soundEnabled = try container.decodeIfPresent(Bool.self, forKey: .soundEnabled)
             ?? defaults.soundEnabled
         launchAtLogin = try container.decodeIfPresent(Bool.self, forKey: .launchAtLogin)
@@ -155,7 +170,8 @@ public struct SettingsIssue: Equatable, Identifiable {
         case idleThresholdSeconds
         case lowBatteryThreshold
         case quietHours
-        case fallbackRemindersEnabled
+        case eyeBreakIntervalSeconds
+        case eyeBreakRestSeconds
         case soundEnabled
         case launchAtLogin
         case calibrationBaseline
@@ -191,6 +207,16 @@ public extension Settings {
         requireFinite(autoDismissSeconds, .autoDismissSeconds, "Dismiss delay must be a number.")
         requireFinite(idleThresholdSeconds, .idleThresholdSeconds, "Idle threshold must be a number.")
         requireFinite(lowBatteryThreshold, .lowBatteryThreshold, "Battery threshold must be a number.")
+        requireFinite(
+            eyeBreakIntervalSeconds,
+            .eyeBreakIntervalSeconds,
+            "Eye-break interval must be a number."
+        )
+        requireFinite(
+            eyeBreakRestSeconds,
+            .eyeBreakRestSeconds,
+            "Eye-break rest duration must be a number."
+        )
 
         if !(3...30).contains(burstSeconds) {
             issues.append(SettingsIssue(
@@ -227,6 +253,18 @@ public extension Settings {
             issues.append(SettingsIssue(
                 field: .lowBatteryThreshold,
                 message: "Battery threshold must be between 5% and 50%."
+            ))
+        }
+        if !(60...3600).contains(eyeBreakIntervalSeconds) {
+            issues.append(SettingsIssue(
+                field: .eyeBreakIntervalSeconds,
+                message: "Eye-break interval must be between 1 and 60 minutes."
+            ))
+        }
+        if !(5...120).contains(eyeBreakRestSeconds) {
+            issues.append(SettingsIssue(
+                field: .eyeBreakRestSeconds,
+                message: "Eye-break rest duration must be between 5 and 120 seconds."
             ))
         }
         if !(0...23).contains(quietHours.startHour) || !(0...59).contains(quietHours.startMinute) {

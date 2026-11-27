@@ -142,43 +142,49 @@ public struct EyeMetrics {
     }
 
     /// Eye-openness ratio for one contour, or `nil` when the contour is degenerate.
+    ///
+    /// This runs twice per frame, so it avoids the four intermediate arrays the
+    /// naive implementation would allocate: extrema and corner indices are found
+    /// in one pass, and only the interior y-values are buffered for sorting.
     public static func opennessRatio(of points: [CGPoint]) -> Double? {
-        guard points.count >= 3,
-              points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else {
-            return nil
-        }
+        guard points.count >= 3 else { return nil }
 
-        let xs = points.map { Double($0.x) }
-        let ys = points.map { Double($0.y) }
-        guard let minX = xs.min(),
-              let maxX = xs.max(),
-              let minY = ys.min(),
-              let maxY = ys.max() else {
-            return nil
+        var minX = Double.infinity
+        var maxX = -Double.infinity
+        var minY = Double.infinity
+        var maxY = -Double.infinity
+        var leftIndex = 0
+        var rightIndex = 0
+
+        for (index, point) in points.enumerated() {
+            let x = Double(point.x)
+            let y = Double(point.y)
+            guard x.isFinite, y.isFinite else { return nil }
+            // Strict comparisons keep the first point at an extrema, matching
+            // the old `firstIndex(of:)` semantics for duplicate corner values.
+            if x < minX { minX = x; leftIndex = index }
+            if x > maxX { maxX = x; rightIndex = index }
+            if y < minY { minY = y }
+            if y > maxY { maxY = y }
         }
 
         let width = maxX - minX
         guard width.isFinite, width > 0 else { return nil }
 
         var height = maxY - minY
+        var interiorY = [Double]()
+        interiorY.reserveCapacity(points.count - 2)
+        for (index, point) in points.enumerated() where index != leftIndex && index != rightIndex {
+            interiorY.append(Double(point.y))
+        }
 
-        // Split the non-corner points into top and bottom halves.
-        let leftIndex = xs.firstIndex(of: minX)!
-        let rightIndex = xs.firstIndex(of: maxX)!
-        let interior = points.enumerated()
-            .filter { $0.offset != leftIndex && $0.offset != rightIndex }
-            .map(\.element)
-
-        if interior.count >= 2 {
-            let sorted = interior.sorted { $0.y < $1.y }
-            let half = sorted.count / 2
-            let bottom = sorted.prefix(half)
-            let top = sorted.suffix(sorted.count - half)
-            if !bottom.isEmpty, !top.isEmpty {
-                let bottomMean = bottom.reduce(0.0) { $0 + Double($1.y) } / Double(bottom.count)
-                let topMean = top.reduce(0.0) { $0 + Double($1.y) } / Double(top.count)
-                height = topMean - bottomMean
-            }
+        if interiorY.count >= 2 {
+            interiorY.sort()
+            let half = interiorY.count / 2
+            let bottomMean = interiorY.prefix(half).reduce(0.0) { $0 + $1 } / Double(half)
+            let topCount = interiorY.count - half
+            let topMean = interiorY.suffix(topCount).reduce(0.0) { $0 + $1 } / Double(topCount)
+            height = topMean - bottomMean
         }
 
         guard height.isFinite, height >= 0 else { return nil }
@@ -187,8 +193,14 @@ public struct EyeMetrics {
     }
 
     static func horizontalSpan(of points: [CGPoint]) -> Double {
-        let xs = points.map { Double($0.x) }
-        guard let minX = xs.min(), let maxX = xs.max() else { return 0 }
+        guard let first = points.first else { return 0 }
+        var minX = Double(first.x)
+        var maxX = minX
+        for point in points.dropFirst() {
+            let x = Double(point.x)
+            if x < minX { minX = x }
+            if x > maxX { maxX = x }
+        }
         return maxX - minX
     }
 }

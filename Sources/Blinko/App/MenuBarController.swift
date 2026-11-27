@@ -7,7 +7,9 @@ final class MenuBarController: NSObject {
     var onReplay: (() -> Void)?
     var onRecord: (() -> Void)?
     var onTogglePause: (() -> Void)?
-    var onToggleFallback: (() -> Void)?
+    var onToggleEyeBreaks: (() -> Void)?
+    var onSetEyeBreakInterval: ((Double) -> Void)?
+    var onTakeEyeBreakNow: (() -> Void)?
     var onToggleQuietHours: (() -> Void)?
     var onSetBlinkInterval: ((Double) -> Void)?
     var onSetAutoDismiss: ((Double) -> Void)?
@@ -19,7 +21,9 @@ final class MenuBarController: NSObject {
     private let statusItem: NSStatusItem
     private let statusLineItem: NSMenuItem
     private let pauseItem: NSMenuItem
-    private let fallbackItem: NSMenuItem
+    private let eyeBreakItem = NSMenuItem(title: "Eye Breaks", action: nil, keyEquivalent: "")
+    private let eyeBreakEnabledItem = NSMenuItem(title: "Enabled", action: nil, keyEquivalent: "")
+    private let eyeBreakNowItem = NSMenuItem(title: "Take Eye Break Now", action: nil, keyEquivalent: "")
     private let quietHoursItem: NSMenuItem
     private let blinkIntervalItem = NSMenuItem(title: "Blink Interval", action: nil, keyEquivalent: "")
     private let autoDismissItem = NSMenuItem(title: "Dismiss After", action: nil, keyEquivalent: "")
@@ -30,20 +34,25 @@ final class MenuBarController: NSObject {
     private var blinkPresetItems: [(seconds: Double, item: NSMenuItem)] = []
     private var autoDismissPresetItems: [(seconds: Double, item: NSMenuItem)] = []
     private var dutyPresetItems: [(burst: Double, interval: Double, item: NSMenuItem)] = []
+    private var eyeBreakPresetItems: [(seconds: Double, item: NSMenuItem)] = []
     private let blinkCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
     private let autoDismissCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
     private let autoDismissNeverItem = NSMenuItem(title: "Never", action: nil, keyEquivalent: "")
+    private let eyeBreakCustomItem = NSMenuItem(title: "Custom…", action: nil, keyEquivalent: "")
     private var currentNoBlinkInterval: Double = 5
     private var currentAutoDismissSeconds: Double = 2.5
     private var currentBurstSeconds: Double = 12
     private var currentIntervalSeconds: Double = 60
+    private var currentEyeBreaksEnabled = true
+    private var currentEyeBreakIntervalSeconds: Double = 20 * 60
+    private var currentNextEyeBreakAt: TimeInterval?
+    private var currentIsEyeBreaking = false
     private var lastSnapshot: MonitorSnapshot?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusLineItem = NSMenuItem(title: "Starting…", action: nil, keyEquivalent: "")
         pauseItem = NSMenuItem(title: "Pause Blinko", action: nil, keyEquivalent: "p")
-        fallbackItem = NSMenuItem(title: "Enable Timed Reminders", action: nil, keyEquivalent: "")
         quietHoursItem = NSMenuItem(title: "Quiet Hours (22:00–08:00)", action: nil, keyEquivalent: "")
         retryItem = NSMenuItem(title: "Retry Camera", action: nil, keyEquivalent: "")
 
@@ -60,10 +69,6 @@ final class MenuBarController: NSObject {
         pauseItem.target = self
         pauseItem.action = #selector(togglePause)
 
-        fallbackItem.target = self
-        fallbackItem.action = #selector(toggleFallback)
-        fallbackItem.isHidden = true
-
         quietHoursItem.target = self
         quietHoursItem.action = #selector(toggleQuietHours)
 
@@ -77,6 +82,7 @@ final class MenuBarController: NSObject {
 
         configureIntervalMenus()
         configureDutyMenu()
+        configureEyeBreakMenu()
 
         let debugItem = NSMenuItem(
             title: "Show Detection Debug…",
@@ -114,7 +120,7 @@ final class MenuBarController: NSObject {
         menu.addItem(statusLineItem)
         menu.addItem(.separator())
         menu.addItem(pauseItem)
-        menu.addItem(fallbackItem)
+        menu.addItem(eyeBreakItem)
         menu.addItem(quietHoursItem)
         menu.addItem(sampleNowItem)
         menu.addItem(retryItem)
@@ -199,6 +205,67 @@ final class MenuBarController: NSObject {
             dutyPresetItems.append((preset.burst, preset.interval, item))
         }
         samplingItem.submenu = dutyMenu
+    }
+
+    private func configureEyeBreakMenu() {
+        let submenu = NSMenu()
+
+        eyeBreakEnabledItem.target = self
+        eyeBreakEnabledItem.action = #selector(toggleEyeBreaks)
+        submenu.addItem(eyeBreakEnabledItem)
+        submenu.addItem(.separator())
+
+        for minutes in [10.0, 15.0, 20.0, 30.0] {
+            let item = NSMenuItem(
+                title: "Every \(Int(minutes)) min",
+                action: #selector(selectEyeBreakPreset(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = NSNumber(value: minutes * 60)
+            submenu.addItem(item)
+            eyeBreakPresetItems.append((minutes * 60, item))
+        }
+
+        eyeBreakCustomItem.target = self
+        eyeBreakCustomItem.action = #selector(customEyeBreakInterval)
+        submenu.addItem(eyeBreakCustomItem)
+        submenu.addItem(.separator())
+
+        eyeBreakNowItem.target = self
+        eyeBreakNowItem.action = #selector(takeEyeBreakNow)
+        submenu.addItem(eyeBreakNowItem)
+
+        eyeBreakItem.submenu = submenu
+    }
+
+    private func updateEyeBreakMenu() {
+        eyeBreakEnabledItem.state = currentEyeBreaksEnabled ? .on : .off
+        eyeBreakEnabledItem.title = currentEyeBreaksEnabled ? "Enabled" : "Disabled"
+
+        var matched = false
+        for preset in eyeBreakPresetItems {
+            let on = abs(preset.seconds - currentEyeBreakIntervalSeconds) < 0.0001
+            preset.item.state = on ? .on : .off
+            if on { matched = true }
+        }
+        eyeBreakCustomItem.state = matched ? .off : .on
+        eyeBreakCustomItem.title = matched
+            ? "Custom…"
+            : "Custom… (\(Int((currentEyeBreakIntervalSeconds / 60).rounded())) min)"
+        eyeBreakNowItem.isEnabled = currentEyeBreaksEnabled
+        eyeBreakItem.title = eyeBreakTitle()
+    }
+
+    private func eyeBreakTitle() -> String {
+        guard currentEyeBreaksEnabled else { return "Eye Breaks: off" }
+        if currentIsEyeBreaking { return "Eye Breaks: resting" }
+        guard let next = currentNextEyeBreakAt else { return "Eye Breaks: on" }
+
+        let remaining = max(0, next - ProcessInfo.processInfo.systemUptime)
+        let minutes = Int((remaining / 60).rounded(.up))
+        if minutes >= 1 { return "Eye Breaks: next in \(minutes)m" }
+        return "Eye Breaks: next in \(Int(remaining.rounded(.up)))s"
     }
 
     private func updateIntervalMenus() {
@@ -305,11 +372,6 @@ final class MenuBarController: NSObject {
         pauseItem.title = snapshot.isPaused ? "Resume Blinko" : "Pause Blinko"
         pauseItem.isEnabled = snapshot.isRunning
 
-        fallbackItem.isHidden = !snapshot.cameraDenied
-        fallbackItem.title = snapshot.fallbackEnabled
-            ? "Disable Timed Reminders"
-            : "Enable Timed Reminders"
-
         retryItem.isHidden = !snapshot.cameraDenied
 
         quietHoursItem.state = snapshot.quietHoursEnabled ? .on : .off
@@ -323,6 +385,18 @@ final class MenuBarController: NSObject {
         currentAutoDismissSeconds = snapshot.autoDismissSeconds
         currentBurstSeconds = snapshot.burstSeconds
         currentIntervalSeconds = snapshot.intervalSeconds
+        // Rebuilding the submenu is only needed when its inputs change; the
+        // title is refreshed on menu open anyway.
+        let eyeBreakStateChanged = currentEyeBreaksEnabled != snapshot.eyeBreaksEnabled
+            || currentEyeBreakIntervalSeconds != snapshot.eyeBreakIntervalSeconds
+            || currentNextEyeBreakAt != snapshot.nextEyeBreakAt
+            || currentIsEyeBreaking != snapshot.isEyeBreaking
+        currentEyeBreaksEnabled = snapshot.eyeBreaksEnabled
+        currentEyeBreakIntervalSeconds = snapshot.eyeBreakIntervalSeconds
+        currentNextEyeBreakAt = snapshot.nextEyeBreakAt
+        currentIsEyeBreaking = snapshot.isEyeBreaking
+        eyeBreakItem.isHidden = false
+        if eyeBreakStateChanged { updateEyeBreakMenu() }
         blinkIntervalItem.isHidden = false
         autoDismissItem.isHidden = false
         samplingItem.isHidden = false
@@ -338,7 +412,7 @@ final class MenuBarController: NSObject {
         setIcon("eye.slash", toolTip: "Blinko — replay mode")
         statusLineItem.title = "Replay mode — reminders off"
         pauseItem.isEnabled = false
-        fallbackItem.isHidden = true
+        eyeBreakItem.isHidden = true
         quietHoursItem.isHidden = true
         sampleNowItem.isHidden = true
         blinkIntervalItem.isHidden = true
@@ -374,8 +448,8 @@ final class MenuBarController: NSObject {
         if snapshot.isPaused { return "Paused — no reminders" }
         if !snapshot.isRunning { return "Stopped" }
         if snapshot.cameraDenied {
-            return snapshot.fallbackEnabled
-                ? "Camera unavailable — timed reminders on"
+            return snapshot.eyeBreaksEnabled
+                ? "Camera unavailable — 20-20-20 breaks on"
                 : "Camera unavailable"
         }
 
@@ -425,8 +499,27 @@ final class MenuBarController: NSObject {
         onTogglePause?()
     }
 
-    @objc private func toggleFallback() {
-        onToggleFallback?()
+    @objc private func toggleEyeBreaks() {
+        onToggleEyeBreaks?()
+    }
+
+    @objc private func selectEyeBreakPreset(_ sender: NSMenuItem) {
+        guard let seconds = (sender.representedObject as? NSNumber)?.doubleValue else { return }
+        onSetEyeBreakInterval?(seconds)
+    }
+
+    @objc private func customEyeBreakInterval() {
+        guard let minutes = promptForSeconds(
+            title: "Eye Break Interval",
+            message: "Start a 20-20-20 eye break after this many minutes. Enter 1–60.",
+            current: currentEyeBreakIntervalSeconds / 60,
+            range: 1...60
+        ) else { return }
+        onSetEyeBreakInterval?(minutes * 60)
+    }
+
+    @objc private func takeEyeBreakNow() {
+        onTakeEyeBreakNow?()
     }
 
     @objc private func toggleQuietHours() {
@@ -489,5 +582,6 @@ extension MenuBarController: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
         guard let lastSnapshot else { return }
         statusLineItem.title = statusLine(for: lastSnapshot)
+        updateEyeBreakMenu()
     }
 }

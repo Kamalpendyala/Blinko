@@ -122,7 +122,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBar.onReplay = { [weak self] in self?.chooseReplayFile() }
         menuBar.onRecord = { [weak self] in self?.chooseRecordingFile() }
         menuBar.onTogglePause = { [weak self] in self?.togglePause() }
-        menuBar.onToggleFallback = { [weak self] in self?.toggleFallback() }
+        menuBar.onToggleEyeBreaks = { [weak self] in self?.toggleEyeBreaks() }
+        menuBar.onSetEyeBreakInterval = { [weak self] seconds in
+            self?.monitor?.setEyeBreakInterval(seconds)
+        }
+        menuBar.onTakeEyeBreakNow = { [weak self] in self?.monitor?.takeEyeBreakNow() }
         menuBar.onToggleQuietHours = { [weak self] in self?.toggleQuietHours() }
         menuBar.onSetBlinkInterval = { [weak self] seconds in self?.setBlinkInterval(seconds) }
         menuBar.onSetAutoDismiss = { [weak self] seconds in self?.setAutoDismiss(seconds) }
@@ -186,9 +190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         monitor.onBlink = { [weak self] blink in
             self?.debugModel?.record(blink: blink)
-            // A blink means the reminder has done its job: hide it at once
-            // instead of waiting for the auto-dismiss timer.
-            self?.nudgePresenter?.dismiss()
+            // A blink means a blink reminder has done its job: hide it at once.
+            // A 20-20-20 eye-break card is left up until its rest timer ends.
+            self?.nudgePresenter?.dismissOnBlink()
         }
         monitor.onNudge = { [weak self] reason in
             self?.presentNudge(reason: reason)
@@ -198,6 +202,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.log("camera error: \(error.description)")
         }
         monitor.onSystemSuspend = { [weak self] in
+            self?.nudgePresenter?.dismiss()
+        }
+        monitor.onEyeBreakCardEnded = { [weak self] in
+            // A blink reminder may have replaced the break card mid-rest;
+            // leave that card's own auto-dismiss timer alone.
+            guard self?.nudgePresenter?.currentReason == .eyeBreak else { return }
             self?.nudgePresenter?.dismiss()
         }
         monitor.onSettingsChanged = { [weak self] settings in
@@ -293,11 +303,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        let wasEyeBreaksEnabled = loadedSettings.eyeBreaksEnabled
         loadedSettings = settings
         suppressSettingsSave = true
         monitor?.apply(settings: settings)
         suppressSettingsSave = false
         nudgePresenter?.setAutoDismissSeconds(settings.autoDismissSeconds)
+        if wasEyeBreaksEnabled, !settings.eyeBreaksEnabled,
+           nudgePresenter?.currentReason == .eyeBreak {
+            nudgePresenter?.dismiss()
+        }
         return nil
     }
 
@@ -422,9 +437,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func toggleFallback() {
+    private func toggleEyeBreaks() {
         guard let monitor else { return }
-        monitor.setFallbackRemindersEnabled(!monitor.settings.fallbackRemindersEnabled)
+        let enabled = !monitor.settings.eyeBreaksEnabled
+        if !enabled, nudgePresenter?.currentReason == .eyeBreak {
+            // Disabling breaks ends any look-away card already on screen.
+            nudgePresenter?.dismiss()
+        }
+        monitor.setEyeBreaksEnabled(enabled)
     }
 
     private func toggleQuietHours() {
@@ -443,10 +463,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func presentNudge(reason: NudgeReason) {
+        let dismissSeconds: Double
+        switch reason {
+        case .eyeBreak:
+            dismissSeconds = monitor?.settings.eyeBreakRestSeconds ?? 20
+        case .noBlink, .lowRate:
+            dismissSeconds = monitor?.settings.autoDismissSeconds ?? 2.5
+        }
+
         nudgePresenter?.present(
             reason: reason,
             soundEnabled: monitor?.settings.soundEnabled ?? false,
-            autoDismissSeconds: monitor?.settings.autoDismissSeconds ?? 2.5
+            autoDismissSeconds: dismissSeconds
         )
         menuBar?.pulse()
         recordNudge()
@@ -454,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch reason {
         case .noBlink: log("nudge: no blink for \(Int(monitor?.settings.noBlinkInterval ?? 0)) s")
         case .lowRate: log("nudge: low blink rate")
-        case .timedFallback: log("nudge: timed fallback")
+        case .eyeBreak: log("nudge: 20-20-20 eye break")
         }
     }
 
@@ -630,14 +658,16 @@ extension AppDelegate: DetectionPipelineDelegate {
     }
 
     func detectionPipelineDidFinishReplay(_ pipeline: DetectionPipeline) {
+        // The replay source is done. Flush the final coalesced batch before
+        // reading the debug counters, otherwise a fast replay can finish ahead
+        // of the 30 Hz hand-off and report a zero/partial summary.
+        pipeline.shutdown()
         let model = debugModel
         let frames = model?.framesSeen ?? 0
         let blinks = model?.blinkCount ?? 0
         let baseline = pipeline.detector.baseline.map { String(format: "%.3f", $0) } ?? "n/a"
         log("replay finished: frames=\(frames) blinks=\(blinks) baseline=\(baseline)")
 
-        // The replay source is done; close any recorder it was writing.
-        pipeline.shutdown()
         replayPipeline = nil
 
         if options.exitAfterReplay {

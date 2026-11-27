@@ -82,11 +82,19 @@ struct QuietHoursTests {
         #expect(quiet.isActive(at: second, calendar: dst))
         #expect(quiet.isActive(at: first, calendar: dst) == quiet.isActive(at: second, calendar: dst))
 
-        // A repeated hour cannot produce two reminders on its own: the policy's
-        // cooldown still applies (NP-03).
-        let policy = NudgePolicy(config: NudgePolicyConfig(fallbackInterval: 2 * 3600))
-        #expect(policy.evaluateFallback(now: first.timeIntervalSince1970, enabled: true, cameraUnavailable: true) == .none)
-        #expect(policy.evaluateFallback(now: second.timeIntervalSince1970, enabled: true, cameraUnavailable: true) == .none)
+        // A repeated wall-clock hour cannot fire an eye break twice: the timer
+        // runs on monotonic time, so moving only the wall clock does nothing.
+        let clock = FakeClock()
+        var timer = EyeBreakTimer(
+            config: EyeBreakTimerConfig(interval: 1_200, restSeconds: 20)
+        )
+        timer.start(at: clock.monotonicNow)
+        clock.setWallClock(first)
+        #expect(timer.evaluate(now: clock.monotonicNow, suppression: []) == .none)
+        clock.setWallClock(second)
+        #expect(timer.evaluate(now: clock.monotonicNow, suppression: []) == .none)
+        clock.advanceMonotonic(by: 1_200)
+        #expect(timer.evaluate(now: clock.monotonicNow, suppression: []) == .beginRest)
     }
 
     @Test("QH-05 a time-zone change recomputes the quiet window")

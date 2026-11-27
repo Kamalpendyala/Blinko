@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import CoreMedia
 import CoreVideo
 import BlinkoCore
 
@@ -74,6 +75,13 @@ public final class CameraFrameSource: NSObject, FrameSource {
         }
     }
 
+    /// Blocks until any capture callback already in flight has returned. The
+    /// pipeline calls this at burst end so no new frame can be enqueued after
+    /// its final delivery drain.
+    func waitForCallbacks() {
+        captureQueue.sync { }
+    }
+
     // MARK: - Configuration
 
     private func configureIfNeeded() throws {
@@ -119,6 +127,31 @@ public final class CameraFrameSource: NSObject, FrameSource {
         }
         session.addOutput(output)
 
+        // A 15 fps cap is ample for 100–400 ms blinks and halves the number of
+        // Vision requests (and BGRA buffers) allocated during each burst.
+        // Configure it after the input is attached: adding an input (and setting
+        // the preset above) can make the session reselect the device's active
+        // format, so checking activeFormat earlier can target the wrong format.
+        let targetFPS = 15.0
+        let supportsTargetFPS = device.activeFormat.videoSupportedFrameRateRanges.contains {
+            $0.minFrameRate <= targetFPS && targetFPS <= $0.maxFrameRate
+        }
+        if supportsTargetFPS {
+            do {
+                try device.lockForConfiguration()
+                defer { device.unlockForConfiguration() }
+                let frameDuration = CMTime(value: 1, timescale: Int32(targetFPS))
+                if device.activeVideoMinFrameDuration != frameDuration {
+                    device.activeVideoMinFrameDuration = frameDuration
+                }
+                if device.activeVideoMaxFrameDuration != frameDuration {
+                    device.activeVideoMaxFrameDuration = frameDuration
+                }
+            } catch {
+                // Keep the camera's default rate if the device refuses the cap.
+            }
+        }
+
         configured = true
     }
 }
@@ -129,14 +162,16 @@ extension CameraFrameSource: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        guard isRunning,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
+        autoreleasepool {
+            guard isRunning,
+                  let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                return
+            }
+            let frame = VideoFrame(
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                pixelBuffer: pixelBuffer
+            )
+            onFrame?(frame)
         }
-        let frame = VideoFrame(
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            pixelBuffer: pixelBuffer
-        )
-        onFrame?(frame)
     }
 }

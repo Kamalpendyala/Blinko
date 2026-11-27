@@ -76,6 +76,10 @@ final class BlinkMonitor {
     var onError: ((FrameSourceError) -> Void)?
     /// Called when the system suspends sampling (sleep, lock, session switch).
     var onSystemSuspend: (() -> Void)?
+    /// Called when a 20-20-20 card should be hidden: its rest ended normally,
+    /// or the cadence was abandoned (pause, stop, system suspend, disabled).
+    /// Lets the presenter avoid owning a second timer for the same interval.
+    var onEyeBreakCardEnded: (() -> Void)?
     /// Called whenever a setting changes, so the app can persist it.
     var onSettingsChanged: ((Settings) -> Void)?
     /// Called after a completed burst with aggregate-only values.
@@ -100,7 +104,7 @@ final class BlinkMonitor {
     private let nudgePolicy = NudgePolicy()
     private let burst = BurstAccumulator()
     private let gapPolicy: BlinkGapPolicy
-    private let eyeBreakTimer: EyeBreakTimer
+    private var eyeBreakTimer: EyeBreakTimer
     private var scheduler: SamplingScheduler
 
     private var pipeline: DetectionPipeline?
@@ -238,6 +242,7 @@ final class BlinkMonitor {
         recorder = nil
         burst.reset()
         gapPolicy.reset()
+        abandonEyeBreakRestIfNeeded()
         stopEyeBreakTimer()
         eyeBreakTimer.reset()
         lastValidFaceAt = nil
@@ -262,6 +267,7 @@ final class BlinkMonitor {
         burst.reset()
         nudgePolicy.resetLowStreak()
         gapPolicy.reset()
+        abandonEyeBreakRestIfNeeded()
         stopEyeBreakTimer()
         eyeBreakTimer.reset()
         lastValidFaceAt = nil
@@ -325,6 +331,7 @@ final class BlinkMonitor {
         assert(Thread.isMainThread)
         guard settings.eyeBreaksEnabled != enabled else { return }
         settings.eyeBreaksEnabled = enabled
+        if !enabled { abandonEyeBreakRestIfNeeded() }
         eyeBreakTimer.setEnabled(enabled, at: clock.monotonicNow)
         if enabled {
             scheduleEyeBreakEvaluation()
@@ -354,6 +361,9 @@ final class BlinkMonitor {
         guard settings.eyeBreakRestSeconds != rest else { return }
         settings.eyeBreakRestSeconds = rest
         eyeBreakTimer.setRestSeconds(rest, at: clock.monotonicNow)
+        // A shorter rest can move restEndsAt earlier; re-arm so the card is
+        // hidden at the new deadline instead of the old one.
+        scheduleEyeBreakEvaluation()
         settingsDidChange()
         publish()
     }
@@ -502,6 +512,7 @@ final class BlinkMonitor {
         }
 
         if newSettings.eyeBreaksEnabled != previous.eyeBreaksEnabled {
+            if !newSettings.eyeBreaksEnabled { abandonEyeBreakRestIfNeeded() }
             eyeBreakTimer.setEnabled(newSettings.eyeBreaksEnabled, at: clock.monotonicNow)
             if !newSettings.eyeBreaksEnabled {
                 stopEyeBreakTimer()
@@ -882,6 +893,14 @@ final class BlinkMonitor {
         eyeBreakWakeTimer = nil
     }
 
+    /// A rest can be abandoned without its deadline firing (pause, stop,
+    /// system suspend or breaks disabled). Notify the UI so the card does not
+    /// outlive the rest now that the presenter owns no timer for it.
+    private func abandonEyeBreakRestIfNeeded() {
+        guard eyeBreakTimer.isResting else { return }
+        onEyeBreakCardEnded?()
+    }
+
     private func eyeBreakHeartbeat() {
         guard isRunning, !isPaused else { return }
 
@@ -890,8 +909,15 @@ final class BlinkMonitor {
             now: now,
             suppression: currentSuppression(now: now, includeCameraUnavailable: false)
         )
-        if case .beginRest = decision {
+        switch decision {
+        case .beginRest:
             deliverNudge(.eyeBreak)
+        case .endRest:
+            // The presenter does not run a second timer for eye breaks; the
+            // monitor's rest deadline is the single source of truth.
+            onEyeBreakCardEnded?()
+        case .none, .suppressed:
+            break
         }
         scheduleEyeBreakEvaluation()
         publishIfChanged()
@@ -938,6 +964,7 @@ final class BlinkMonitor {
 
     private func suspendForSystem(reason: String) {
         cancelTimers()
+        abandonEyeBreakRestIfNeeded()
         stopEyeBreakTimer()
         eyeBreakTimer.reset()
         stopCurrentBurst()

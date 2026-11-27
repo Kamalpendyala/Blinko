@@ -385,12 +385,18 @@ final class MenuBarController: NSObject {
         currentAutoDismissSeconds = snapshot.autoDismissSeconds
         currentBurstSeconds = snapshot.burstSeconds
         currentIntervalSeconds = snapshot.intervalSeconds
+        // Rebuilding the submenu is only needed when its inputs change; the
+        // title is refreshed on menu open anyway.
+        let eyeBreakStateChanged = currentEyeBreaksEnabled != snapshot.eyeBreaksEnabled
+            || currentEyeBreakIntervalSeconds != snapshot.eyeBreakIntervalSeconds
+            || currentNextEyeBreakAt != snapshot.nextEyeBreakAt
+            || currentIsEyeBreaking != snapshot.isEyeBreaking
         currentEyeBreaksEnabled = snapshot.eyeBreaksEnabled
         currentEyeBreakIntervalSeconds = snapshot.eyeBreakIntervalSeconds
         currentNextEyeBreakAt = snapshot.nextEyeBreakAt
         currentIsEyeBreaking = snapshot.isEyeBreaking
         eyeBreakItem.isHidden = false
-        updateEyeBreakMenu()
+        if eyeBreakStateChanged { updateEyeBreakMenu() }
         blinkIntervalItem.isHidden = false
         autoDismissItem.isHidden = false
         samplingItem.isHidden = false

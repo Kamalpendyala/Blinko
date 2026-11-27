@@ -204,6 +204,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         monitor.onSystemSuspend = { [weak self] in
             self?.nudgePresenter?.dismiss()
         }
+        monitor.onEyeBreakCardEnded = { [weak self] in
+            // A blink reminder may have replaced the break card mid-rest;
+            // leave that card's own auto-dismiss timer alone.
+            guard self?.nudgePresenter?.currentReason == .eyeBreak else { return }
+            self?.nudgePresenter?.dismiss()
+        }
         monitor.onSettingsChanged = { [weak self] settings in
             self?.persist(settings)
         }

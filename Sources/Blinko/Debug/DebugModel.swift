@@ -156,12 +156,22 @@ final class DebugModel: ObservableObject {
         nextBurstAt = monitor.nextBurstAt
         burstEndsAt = monitor.burstEndsAt
         suppression = monitor.suppression
-        eyeBreaksEnabled = monitor.eyeBreaksEnabled
-        eyeBreakIntervalSeconds = monitor.eyeBreakIntervalSeconds
-        eyeBreakRestSeconds = monitor.eyeBreakRestSeconds
+        setIfChanged(\.eyeBreaksEnabled, monitor.eyeBreaksEnabled)
+        setIfChanged(\.eyeBreakIntervalSeconds, monitor.eyeBreakIntervalSeconds)
+        setIfChanged(\.eyeBreakRestSeconds, monitor.eyeBreakRestSeconds)
         nextEyeBreakAt = monitor.nextEyeBreakAt
-        isEyeBreaking = monitor.isEyeBreaking
+        setIfChanged(\.isEyeBreaking, monitor.isEyeBreaking)
         refreshCountdown()
+    }
+
+    /// `@Published` emits on every assignment, so skip no-op writes for the
+    /// eye-break readouts that rarely change.
+    private func setIfChanged<T: Equatable>(
+        _ keyPath: ReferenceWritableKeyPath<DebugModel, T>,
+        _ value: T
+    ) {
+        guard self[keyPath: keyPath] != value else { return }
+        self[keyPath: keyPath] = value
     }
 
     /// Drops live-monitor fields when switching to replay/diagnostic mode.

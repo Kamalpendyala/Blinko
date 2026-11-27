@@ -30,6 +30,11 @@ final class NudgePresenter {
             sound.play()
         }
 
+        // Eye breaks are ended by the monitor's rest deadline (which reports
+        // through BlinkMonitor.onEyeBreakCardEnded). Adding a second timer here
+        // would duplicate the countdown and could diverge if the rest duration
+        // changes mid-break.
+        guard reason != .eyeBreak else { return }
         scheduleAutoDismiss()
     }
 

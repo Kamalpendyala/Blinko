@@ -85,7 +85,7 @@ struct QuietHoursTests {
         // A repeated wall-clock hour cannot fire an eye break twice: the timer
         // runs on monotonic time, so moving only the wall clock does nothing.
         let clock = FakeClock()
-        let timer = EyeBreakTimer(
+        var timer = EyeBreakTimer(
             config: EyeBreakTimerConfig(interval: 1_200, restSeconds: 20)
         )
         timer.start(at: clock.monotonicNow)

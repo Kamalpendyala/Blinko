@@ -67,8 +67,8 @@ Phase D is awaiting review and the manual checks in §“Phase D acceptance stat
   Settings; no executable path is persisted.
 - **Delete all data** restores defaults and empties the store (DB-06).
 - Menu bar item (`LSUIElement`), no Dock icon, sandboxed with camera access.
-- 87 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…06, GAP-01…07,
-  SC-01…09, QH-01…05, DB-01…07, EB-01…08, calibration, Settings
+- 88 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…06, GAP-01…07,
+  SC-01…09, QH-01…05, DB-01…07, EB-01…09, calibration, Settings
   validation/round-trips, CSV round-trip and the clock seam.
 
 ## Requirements
@@ -342,7 +342,7 @@ Manual Phase B check:
 
 | Item | Status |
 |------|--------|
-| SC-01…09 unit tests (cadence, sleep, late ticks, clock jumps, lock, battery, idle) | ✅ passing (87 tests total) |
+| SC-01…09 unit tests (cadence, sleep, late ticks, clock jumps, lock, battery, idle) | ✅ passing (88 tests total) |
 | QH-03…05 unit tests (DST spring-forward/fall-back, time-zone change) | ✅ passing |
 | Absolute monotonic deadlines; no countdown timers between bursts | ✅ implemented |
 | One tolerant one-shot timer; `ProcessInfo` assertion only during a burst | ✅ implemented |
@@ -418,7 +418,7 @@ Recorded budgets (fill in after running the procedure above):
 | AP-03…07 camera denial/in-use/unplug, non-stealing nudge | ✅ implemented in earlier phases; manual checks pending |
 | AP-08 zero outbound connections | ✅ no networking frameworks linked; `nettop` check pending |
 | PF-01…06 RSS, CPU, energy, 8 h soak, camera indicator | ⏳ manual; use `./Scripts/measure-app.sh` from the Phase C section |
-| 87 automated tests in 15 suites | ✅ `swift test` passing |
+| 88 automated tests in 15 suites | ✅ `swift test` passing |
 
 Manual Phase D check:
 
@@ -447,7 +447,7 @@ Manual Phase D check:
 
 | Item | Status |
 |------|--------|
-| EB-01…08 unit tests (cadence, rest window, no overlap, suppression, manual, interval, disable) | ✅ passing |
+| EB-01…09 unit tests (cadence, rest window, no overlap, suppression, manual, interval, disable, rest-duration change) | ✅ passing |
 | Breaks default to on (20 min interval, 20 s rest) | ✅ implemented; Settings + menu toggle |
 | Works with camera denied or unavailable | ✅ timer is independent of the camera path |
 | Static card, no live countdown | ✅ no polling; menu/debug countdown computed on demand |
@@ -456,7 +456,9 @@ Manual Phase D check:
 | Legacy `fallbackRemindersEnabled` key ignored | ✅ covered by tolerant decode test |
 | No schema bump or new aggregate column | ✅ v2 store; breaks fold into `nudgeCount` |
 | One tolerant one-shot timer; no per-second polling | ✅ `EyeBreakTimer` + menu/debug on-demand countdown |
-| 87 automated tests in 15 suites | ✅ `swift test` passing |
+| Card dismissal driven by the monitor's rest deadline | ✅ `onEyeBreakCardEnded` on expiry or abandonment; no second GCD timer in `NudgePresenter` |
+| Rest-duration change re-arms an active rest | ✅ `setEyeBreakRestSeconds` re-arms the wake timer |
+| 88 automated tests in 15 suites | ✅ `swift test` passing |
 
 Manual Phase E check:
 
@@ -482,7 +484,7 @@ Sources/
     Core/RateEstimator.swift      BurstSummary, RateEstimator (RE-01…04)
     Core/BurstAccumulator.swift   valid-face seconds + blink count per burst
     Core/NudgePolicy.swift        rate policy, suppression (NP-01…06)
-    Core/EyeBreakTimer.swift      camera-independent 20-20-20 timer (EB-01…08)
+    Core/EyeBreakTimer.swift      camera-independent 20-20-20 timer (EB-01…09)
     Core/QuietHours.swift         quiet-window evaluation (QH-01…05)
     Core/CalibrationCollector.swift median baseline for guided calibration
     Core/SamplingScheduler.swift  absolute-time duty cycle (SC-01…07)
@@ -574,4 +576,4 @@ inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
   soak still need to be recorded above before sign-off.
 - **Phase E:** ✅ camera-independent 20-20-20 breaks (default 20 min / 20 s), a
   static look-away card that blinks do not dismiss, menu + Settings controls,
-  EB-01…08 automated tests. The manual checks above still need to be recorded.
+  EB-01…09 automated tests. The manual checks above still need to be recorded.

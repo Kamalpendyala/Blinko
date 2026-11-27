@@ -37,7 +37,7 @@ public enum EyeBreakDecision: Equatable {
 /// `nextDeadline()` and calls `evaluate` when it wakes. Time is monotonic
 /// seconds supplied by the caller, so wall-clock jumps cannot delay or duplicate
 /// a break (same rule as `BlinkGapPolicy`).
-public final class EyeBreakTimer {
+public struct EyeBreakTimer {
     public private(set) var config: EyeBreakTimerConfig
     /// When the next automatic break is due, or nil while resting/disabled.
     public private(set) var nextBreakAt: TimeInterval?
@@ -54,12 +54,12 @@ public final class EyeBreakTimer {
 
     /// Starts (or restarts) the cadence. The first break is one full interval
     /// away, so enabling breaks never nags immediately.
-    public func start(at now: TimeInterval) {
+    public mutating func start(at now: TimeInterval) {
         restEndsAt = nil
         nextBreakAt = config.enabled ? now + config.interval : nil
     }
 
-    public func setEnabled(_ enabled: Bool, at now: TimeInterval) {
+    public mutating func setEnabled(_ enabled: Bool, at now: TimeInterval) {
         guard config.enabled != enabled else { return }
         config.enabled = enabled
         if enabled {
@@ -73,7 +73,7 @@ public final class EyeBreakTimer {
     }
 
     /// Re-arms from `now` so a new interval takes effect immediately.
-    public func setInterval(_ interval: TimeInterval, at now: TimeInterval) {
+    public mutating func setInterval(_ interval: TimeInterval, at now: TimeInterval) {
         guard interval > 0, config.interval != interval else { return }
         config.interval = interval
         if config.enabled, restEndsAt == nil {
@@ -83,7 +83,7 @@ public final class EyeBreakTimer {
 
     /// Changes the rest duration. A shorter duration can end the current rest
     /// sooner; a longer one never extends a rest already in progress.
-    public func setRestSeconds(_ seconds: TimeInterval, at now: TimeInterval) {
+    public mutating func setRestSeconds(_ seconds: TimeInterval, at now: TimeInterval) {
         guard seconds > 0, config.restSeconds != seconds else { return }
         config.restSeconds = seconds
         if let currentEnd = restEndsAt {
@@ -94,7 +94,7 @@ public final class EyeBreakTimer {
     /// Manual "Take Eye Break Now". Restarts the rest window and resets the
     /// next automatic break to one full interval after the rest ends.
     @discardableResult
-    public func beginNow(at now: TimeInterval) -> EyeBreakDecision {
+    public mutating func beginNow(at now: TimeInterval) -> EyeBreakDecision {
         guard config.enabled else { return .none }
         if restEndsAt == nil {
             breakCount += 1
@@ -110,7 +110,10 @@ public final class EyeBreakTimer {
     /// full interval later instead of firing late (no catch-up after sleep,
     /// quiet hours or pause).
     @discardableResult
-    public func evaluate(now: TimeInterval, suppression: NudgeSuppression = []) -> EyeBreakDecision {
+    public mutating func evaluate(
+        now: TimeInterval,
+        suppression: NudgeSuppression = []
+    ) -> EyeBreakDecision {
         if let restEnd = restEndsAt {
             guard now >= restEnd else { return .none }
             restEndsAt = nil
@@ -148,7 +151,7 @@ public final class EyeBreakTimer {
         return nextBreakAt
     }
 
-    public func reset() {
+    public mutating func reset() {
         nextBreakAt = nil
         restEndsAt = nil
         breakCount = 0

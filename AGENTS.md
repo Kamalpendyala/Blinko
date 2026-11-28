@@ -33,7 +33,7 @@ Run from repo root (scripts `cd` themselves):
 
 - `./Scripts/test.sh` → `swift test`. Args pass through, so
   `./Scripts/test.sh --filter EyeMetricsTests` runs one suite. Full run is
-  ~81 tests / 14 suites in ~14 s — run it after every change.
+  ~102 tests / 16 suites in ~15 s — run it after every change.
 - `./Scripts/build-app.sh` → release `build/Blinko.app` (deletes and re-signs
   the existing bundle; `build/` is gitignored). Default identity is ad-hoc `-`;
   use `CODESIGN_IDENTITY="Apple Development: …"` for a stable camera grant.

@@ -10,10 +10,14 @@ polish) + Phase E (20-20-20 eye breaks) implemented.** The camera runs in short
 bursts — 12 s every 60 s by default — and is fully stopped in between, so the
 camera indicator is dark most of the time. Settings, the guided calibration
 baseline and daily aggregate counts persist in a versioned, atomic JSON store.
-Phase E adds a camera-independent 20-minute break timer with a 20-second
-look-away card, so eye breaks keep working even when camera access is denied.
-Phase D is awaiting review and the manual checks in §“Phase D acceptance status”
-(single instance, login item, 8-hour soak).
+Phase E adds a camera-independent 20-minute break timer with a configurable
+look-away card (20 s by default), so eye breaks keep working even when camera
+access is denied. After a break the focus timer waits for you to come back: a
+60-second grace period lets you leave, and a full 20 minutes then starts at the
+first sign of presence (camera face, or keyboard/mouse when the camera cannot
+see you). Phase D and Phase E are merged; the manual checks in §“Phase D
+acceptance status” (single instance, login item, 8-hour soak) are still
+outstanding.
 
 ---
 
@@ -43,9 +47,14 @@ Phase D is awaiting review and the manual checks in §“Phase D acceptance stat
 - **Quiet Hours (22:00–08:00)** menu toggle. Off by default in this tuning
   build so the 5 s reminder is easy to observe.
 - **20-20-20 eye breaks**: a camera-independent timer (default every 20 min)
-  shows a static “look ~20 feet away for 20 seconds” card for 20 s. It works
+  shows a static “look ~20 feet away” card for the configured rest (20 s by
+  default). It works
   when the camera is denied, is not dismissed by a blink, and never catches up
-  on breaks missed while paused, asleep or in quiet hours.
+  on breaks missed while paused, asleep or in quiet hours. After the card ends
+  the focus timer stops: a 60 s grace period passes, then a full fresh interval
+  starts when you are seen again (camera face, or keyboard/mouse as an implicit
+  fallback). Time away is never credited, so a break cannot fire at an empty
+  desk.
 - Debug window with live openness trace, baseline/threshold lines, blink count,
   valid-face percentage, smoothed rate, seconds since the last blink, nudge
   count, sampling countdown, current suppression reason, **Sample Now** and
@@ -67,8 +76,8 @@ Phase D is awaiting review and the manual checks in §“Phase D acceptance stat
   Settings; no executable path is persisted.
 - **Delete all data** restores defaults and empties the store (DB-06).
 - Menu bar item (`LSUIElement`), no Dock icon, sandboxed with camera access.
-- 88 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…06, GAP-01…07,
-  SC-01…09, QH-01…05, DB-01…07, EB-01…09, calibration, Settings
+- 102 unit tests covering EM-01…05, BD-01…10, RE-01…04, NP-01…06, GAP-01…07,
+  SC-01…09, QH-01…05, DB-01…07, EB-01…22 (incl. EB-13b), calibration, Settings
   validation/round-trips, CSV round-trip and the clock seam.
 
 ## Requirements
@@ -114,8 +123,8 @@ The live pipeline keeps per-burst allocations bounded:
   dispatch block per frame. The flush timer is cancellable, and pending
   deliveries are drained at burst end as well as on shutdown so the last batch
   is never dropped by the monitor's burst gate.
-- `EyeMetrics` finds eye-contour extrema in one pass and reuses a single small
-  buffer for the interior points, instead of allocating four temporary arrays
+- `EyeMetrics` finds eye-contour extrema in one pass and allocates one small
+  buffer for the interior points, instead of four temporary arrays
   per eye per frame.
 
 A 150 s / 5 s run with the camera active on this machine showed RSS dropping
@@ -156,7 +165,8 @@ The menu bar menu contains:
   or eye breaks fire while paused.
 - **Eye Breaks: next in Nm** — submenu with an **Enabled** checkmark, interval
   presets (10/15/20/30 min) plus **Custom…** (1–60 min), and **Take Eye Break
-  Now**. Works with or without camera access.
+  Now**. Works with or without camera access. While the post-break timer waits
+  for you to return it reads **Eye Breaks: waiting for you**.
 - **Quiet Hours (22:00–08:00)** — checkmark toggle; suppresses reminders when on.
 - **Blink Interval: N s** — presets 3/5/10/15/20/30 s plus **Custom…** (1–300 s).
 - **Dismiss After: N s** — presets 1/2.5/5/10 s, **Never**, plus **Custom…** (0.5–60 s).
@@ -447,18 +457,24 @@ Manual Phase D check:
 
 | Item | Status |
 |------|--------|
-| EB-01…09 unit tests (cadence, rest window, no overlap, suppression, manual, interval, disable, rest-duration change) | ✅ passing |
+| EB-01…17 unit tests (cadence, rest window, no overlap, suppression, manual, interval, disable, rest-duration change, grace period, no-credit return, retry deadlines, idle interaction, late wake, zero grace, start/reset) | ✅ passing |
+| EB-18…22 unit tests (camera presence, keyboard/mouse fallback, away, unknown idle, window boundaries) | ✅ passing |
 | Breaks default to on (20 min interval, 20 s rest) | ✅ implemented; Settings + menu toggle |
 | Works with camera denied or unavailable | ✅ timer is independent of the camera path |
 | Static card, no live countdown | ✅ no polling; menu/debug countdown computed on demand |
 | A blink does not dismiss an eye-break card | ✅ `NudgePresenter.dismissOnBlink()` |
+| Card auto-dismisses at the end of the rest even if the user left | ✅ `.endRest` hides the card regardless of presence |
+| Focus timer stops at the end of a break | ✅ `nextBreakAt` is nil while `isAwaitingReturn` |
+| 60 s grace period measured from the rest end | ✅ `resumeNotBefore = restEnd + 60`; late wakes do not shorten it |
+| Full fresh interval starts only on return | ✅ `resumeFocus` arms `now + interval`; no credit for absence |
+| Return signal: camera face, then keyboard/mouse fallback | ✅ `ReturnPresence`; implicit, no toggle |
 | Missed breaks are rescheduled, never replayed late | ✅ monotonic one-shot timer, no catch-up |
 | Legacy `fallbackRemindersEnabled` key ignored | ✅ covered by tolerant decode test |
 | No schema bump or new aggregate column | ✅ v2 store; breaks fold into `nudgeCount` |
-| One tolerant one-shot timer; no per-second polling | ✅ `EyeBreakTimer` + menu/debug on-demand countdown |
+| One tolerant one-shot timer; no per-second polling | ✅ `EyeBreakTimer` + a 5 s re-check only while waiting for return |
 | Card dismissal driven by the monitor's rest deadline | ✅ `onEyeBreakCardEnded` on expiry or abandonment; no second GCD timer in `NudgePresenter` |
 | Rest-duration change re-arms an active rest | ✅ `setEyeBreakRestSeconds` re-arms the wake timer |
-| 88 automated tests in 15 suites | ✅ `swift test` passing |
+| 102 automated tests in 16 suites | ✅ `swift test` passing |
 
 Manual Phase E check:
 
@@ -472,7 +488,12 @@ Manual Phase E check:
 4. Pause Blinko and set the interval to 1 min; wait past a deadline, then resume.
    Confirm one fresh break a full interval later, with no burst of missed cards.
 5. Use **Take Eye Break Now** and confirm the next automatic break is one full
-   interval after the rest ends.
+   interval after the rest ends and you return.
+6. Take a break, then walk away for 5+ minutes. Confirm no card appears while
+   you are away and the menu reads **Eye Breaks: waiting for you**. Come back
+   and move the mouse: within a few seconds the menu shows **next in 20m**.
+7. With camera access denied, repeat step 6 using only keyboard/mouse activity;
+   the fallback must start the timer without any setting being changed.
 
 ## Layout
 
@@ -484,7 +505,8 @@ Sources/
     Core/RateEstimator.swift      BurstSummary, RateEstimator (RE-01…04)
     Core/BurstAccumulator.swift   valid-face seconds + blink count per burst
     Core/NudgePolicy.swift        rate policy, suppression (NP-01…06)
-    Core/EyeBreakTimer.swift      camera-independent 20-20-20 timer (EB-01…09)
+    Core/EyeBreakTimer.swift      camera-independent 20-20-20 timer (EB-01…17)
+    Core/ReturnPresence.swift     camera/keyboard-mouse return signal (EB-18…22)
     Core/QuietHours.swift         quiet-window evaluation (QH-01…05)
     Core/CalibrationCollector.swift median baseline for guided calibration
     Core/SamplingScheduler.swift  absolute-time duty cycle (SC-01…07)
@@ -558,6 +580,9 @@ inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
   edits discards them.
 - **Eye breaks are independent of the camera:** the 20-20-20 timer runs whether
   camera access is granted or denied, and is not affected by camera bursts.
+  After a break, the next interval only starts once you are back: the camera is
+  the primary signal and keyboard/mouse activity is the implicit fallback, so
+  no setting needs to change when the camera is unavailable.
 - **Some policy state is intentionally in memory:** the nudge history and rate
   streak reset on launch. Pause state, reminder cadence, calibration and daily
   counts persist; one aggregate row is kept per calendar day.
@@ -575,5 +600,7 @@ inside `Sources/BlinkoCore` (logic) and `Sources/Blinko` (platform glue).
   delete-all-data, DB-01…07 automated tests. Manual AP/PF checks and the 8-hour
   soak still need to be recorded above before sign-off.
 - **Phase E:** ✅ camera-independent 20-20-20 breaks (default 20 min / 20 s), a
-  static look-away card that blinks do not dismiss, menu + Settings controls,
-  EB-01…09 automated tests. The manual checks above still need to be recorded.
+  static look-away card that blinks do not dismiss, a return-gated focus timer
+  (60 s grace, then a full interval on camera or keyboard/mouse presence), menu
+  + Settings controls, EB-01…22 automated tests. The manual checks above still
+  need to be recorded.

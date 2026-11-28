@@ -61,18 +61,30 @@ public final class CameraFrameSource: NSObject, FrameSource {
         }
     }
 
-    public func stop() {
+    /// Stops frame delivery immediately without tearing the session down.
+    ///
+    /// Burst end splits stop into two steps so it can drain in-flight work
+    /// between them: `waitForCallbacks()` only queues behind frame callbacks,
+    /// not behind the (potentially slow) `stopRunning()` call.
+    public func stopDelivering() {
         stateLock.lock()
-        let wasRunning = running
         running = false
         stateLock.unlock()
-        guard wasRunning else { return }
+    }
 
+    /// Tears the capture session down. Enqueued on the capture queue so it
+    /// stays ordered with `start()`; safe to call after `stopDelivering()`.
+    public func finishStopping() {
         captureQueue.async { [session] in
             if session.isRunning {
                 session.stopRunning()
             }
         }
+    }
+
+    public func stop() {
+        stopDelivering()
+        finishStopping()
     }
 
     /// Blocks until any capture callback already in flight has returned. The

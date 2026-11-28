@@ -91,6 +91,22 @@ final class DetectionPipeline {
     /// Stops capture but keeps the configured session for the next burst.
     func stopCamera() {
         camera?.stop()
+        clearBusy()
+    }
+
+    /// Burst-end stop: halts delivery, drains the final batch while the burst
+    /// is still open, then tears the session down. Waiting for `stopRunning()`
+    /// before the drain would stall the main thread for the whole camera
+    /// teardown, so the drain barrier runs first.
+    func stopCameraAndDrain() {
+        assert(Thread.isMainThread)
+        camera?.stopDelivering()
+        drainPendingDeliveries()
+        camera?.finishStopping()
+        clearBusy()
+    }
+
+    private func clearBusy() {
         busyLock.lock()
         busy = false
         busyLock.unlock()
@@ -152,8 +168,12 @@ final class DetectionPipeline {
     }
 
     func shutdown() {
-        stop()
-        if Thread.isMainThread { drainPendingDeliveries() }
+        stopReplay()
+        if Thread.isMainThread {
+            stopCameraAndDrain()
+        } else {
+            stopCamera()
+        }
         camera = nil
         recorder?.close()
     }

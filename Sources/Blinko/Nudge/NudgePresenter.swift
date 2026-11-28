@@ -17,11 +17,17 @@ final class NudgePresenter {
     ) {
         assert(Thread.isMainThread)
 
+        // A new card supersedes any auto-dismiss still pending for the previous
+        // one. Without this, a blink card's timer could hide a break card that
+        // replaced it mid-countdown.
+        dismissWorkItem?.cancel()
+        dismissWorkItem = nil
+
         let panel = panel ?? NudgePanel()
         self.panel = panel
         self.autoDismissSeconds = autoDismissSeconds
         self.currentReason = reason
-        panel.update(reason: reason)
+        panel.update(reason: reason, restSeconds: autoDismissSeconds)
         panel.positionOnActiveScreen()
         panel.show()
         isVisible = true

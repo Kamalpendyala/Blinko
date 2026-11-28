@@ -44,9 +44,12 @@ final class MenuBarController: NSObject {
     private var currentBurstSeconds: Double = 12
     private var currentIntervalSeconds: Double = 60
     private var currentEyeBreaksEnabled = true
+    private var currentIsRunning = false
+    private var currentIsPaused = false
     private var currentEyeBreakIntervalSeconds: Double = 20 * 60
     private var currentNextEyeBreakAt: TimeInterval?
     private var currentIsEyeBreaking = false
+    private var currentIsAwaitingEyeBreakReturn = false
     private var lastSnapshot: MonitorSnapshot?
 
     override init() {
@@ -253,13 +256,18 @@ final class MenuBarController: NSObject {
         eyeBreakCustomItem.title = matched
             ? "Custom…"
             : "Custom… (\(Int((currentEyeBreakIntervalSeconds / 60).rounded())) min)"
-        eyeBreakNowItem.isEnabled = currentEyeBreaksEnabled
+        // Starting a break requires a running, unpaused monitor; the action
+        // silently returns otherwise, so keep the item disabled in that state.
+        eyeBreakNowItem.isEnabled = currentEyeBreaksEnabled && currentIsRunning && !currentIsPaused
         eyeBreakItem.title = eyeBreakTitle()
     }
 
     private func eyeBreakTitle() -> String {
         guard currentEyeBreaksEnabled else { return "Eye Breaks: off" }
+        if !currentIsRunning { return "Eye Breaks: stopped" }
+        if currentIsPaused { return "Eye Breaks: paused" }
         if currentIsEyeBreaking { return "Eye Breaks: resting" }
+        if currentIsAwaitingEyeBreakReturn { return "Eye Breaks: waiting for you" }
         guard let next = currentNextEyeBreakAt else { return "Eye Breaks: on" }
 
         let remaining = max(0, next - ProcessInfo.processInfo.systemUptime)
@@ -388,13 +396,19 @@ final class MenuBarController: NSObject {
         // Rebuilding the submenu is only needed when its inputs change; the
         // title is refreshed on menu open anyway.
         let eyeBreakStateChanged = currentEyeBreaksEnabled != snapshot.eyeBreaksEnabled
+            || currentIsRunning != snapshot.isRunning
+            || currentIsPaused != snapshot.isPaused
             || currentEyeBreakIntervalSeconds != snapshot.eyeBreakIntervalSeconds
             || currentNextEyeBreakAt != snapshot.nextEyeBreakAt
             || currentIsEyeBreaking != snapshot.isEyeBreaking
+            || currentIsAwaitingEyeBreakReturn != snapshot.isAwaitingEyeBreakReturn
         currentEyeBreaksEnabled = snapshot.eyeBreaksEnabled
+        currentIsRunning = snapshot.isRunning
+        currentIsPaused = snapshot.isPaused
         currentEyeBreakIntervalSeconds = snapshot.eyeBreakIntervalSeconds
         currentNextEyeBreakAt = snapshot.nextEyeBreakAt
         currentIsEyeBreaking = snapshot.isEyeBreaking
+        currentIsAwaitingEyeBreakReturn = snapshot.isAwaitingEyeBreakReturn
         eyeBreakItem.isHidden = false
         if eyeBreakStateChanged { updateEyeBreakMenu() }
         blinkIntervalItem.isHidden = false

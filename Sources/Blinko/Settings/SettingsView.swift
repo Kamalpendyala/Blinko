@@ -188,8 +188,10 @@ struct SettingsView: View {
             Toggle("Enable 20-20-20 eye breaks", isOn: $model.draft.eyeBreaksEnabled)
 
             Text(
-                "Every 20 minutes, Blinko asks you to look at something about 20 feet "
-                + "away for 20 seconds. This works even when the camera is unavailable."
+                "Every \(Self.numberText(model.draft.eyeBreakIntervalSeconds / 60)) minutes, "
+                + "Blinko asks you to look at something about 20 feet away for "
+                + "\(Self.numberText(model.draft.eyeBreakRestSeconds)) seconds. "
+                + "This works even when the camera is unavailable."
             )
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -347,6 +349,11 @@ struct SettingsView: View {
                     .foregroundStyle(.red)
             }
         }
+    }
+
+    /// Trims a whole value's trailing `.0` so the blurb reads "20 minutes".
+    private static func numberText(_ value: Double) -> String {
+        value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
     }
 
     private func quietTimeBinding(

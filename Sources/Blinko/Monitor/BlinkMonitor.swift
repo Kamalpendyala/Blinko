@@ -34,6 +34,8 @@ struct MonitorSnapshot: Equatable {
     var eyeBreakRestSeconds: Double
     var nextEyeBreakAt: TimeInterval?
     var isEyeBreaking: Bool
+    /// A rest has ended and the focus timer is waiting for the user to return.
+    var isAwaitingEyeBreakReturn: Bool
 }
 
 /// State of the guided calibration flow shown in Settings.
@@ -104,6 +106,12 @@ final class BlinkMonitor {
     private let nudgePolicy = NudgePolicy()
     private let burst = BurstAccumulator()
     private let gapPolicy: BlinkGapPolicy
+    /// Camera face presence first, keyboard/mouse as the implicit fallback.
+    /// The input window tracks the timer's return-check cadence so a check can
+    /// always see the input that happened since the previous one.
+    private let returnPresence = ReturnPresence(
+        inputWindow: EyeBreakTimerConfig().returnCheckSeconds + 1
+    )
     private var eyeBreakTimer: EyeBreakTimer
     private var scheduler: SamplingScheduler
 
@@ -750,11 +758,11 @@ final class BlinkMonitor {
             abortCalibration(reason: "Calibration was cut short by the sampling window. Please try again.")
         }
         stopHeartbeat()
-        pipeline?.stopCamera()
-        // Deliver the final coalesced batch while the burst is still open.
-        // Otherwise the 30 Hz hand-off lands after `isBursting` flips false and
-        // `ingest` drops those samples and blinks.
-        pipeline?.drainPendingDeliveries()
+        // Stops delivery, delivers the final coalesced batch while the burst is
+        // still open, then tears the session down. Otherwise the 30 Hz hand-off
+        // lands after `isBursting` flips false and `ingest` drops those samples
+        // and blinks.
+        pipeline?.stopCameraAndDrain()
         finishBurst(at: now)
         gapPolicy.reset()
         lastValidFaceAt = nil
@@ -877,7 +885,7 @@ final class BlinkMonitor {
     private func scheduleEyeBreakEvaluation() {
         stopEyeBreakTimer()
         guard isRunning, !isPaused, !isSystemBlocked else { return }
-        guard let deadline = eyeBreakTimer.nextDeadline() else { return }
+        guard let deadline = eyeBreakTimer.nextDeadline(after: clock.monotonicNow) else { return }
 
         let delay = max(0.05, deadline - clock.monotonicNow)
         let timer = Timer(timeInterval: delay, repeats: false) { [weak self] _ in
@@ -907,20 +915,37 @@ final class BlinkMonitor {
         let now = clock.monotonicNow
         let decision = eyeBreakTimer.evaluate(
             now: now,
-            suppression: currentSuppression(now: now, includeCameraUnavailable: false)
+            suppression: currentSuppression(now: now, includeCameraUnavailable: false),
+            presenceDetected: isUserPresent(now: now)
         )
         switch decision {
         case .beginRest:
             deliverNudge(.eyeBreak)
         case .endRest:
             // The presenter does not run a second timer for eye breaks; the
-            // monitor's rest deadline is the single source of truth.
+            // monitor's rest deadline is the single source of truth. The card
+            // is hidden even if the user has left; the focus timer stays
+            // stopped until they are seen again.
             onEyeBreakCardEnded?()
+            setStatus("Eye break over — waiting for you to return.")
+        case .resumeFocus:
+            setStatus("Next 20-20-20 break in \(Int(settings.eyeBreakIntervalSeconds / 60)) min.")
         case .none, .suppressed:
             break
         }
         scheduleEyeBreakEvaluation()
         publishIfChanged()
+    }
+
+    /// True when the user is back at the machine. The camera is the primary
+    /// signal; keyboard/mouse activity is the implicit fallback for a denied,
+    /// covered or unavailable camera, or when no face is detected.
+    private func isUserPresent(now: TimeInterval) -> Bool {
+        returnPresence.isPresent(
+            now: now,
+            lastValidFaceAt: lastValidFaceAt,
+            secondsSinceInput: idleMonitor.secondsSinceLastInput
+        )
     }
 
     // MARK: - Power events
@@ -1097,7 +1122,8 @@ final class BlinkMonitor {
             eyeBreakIntervalSeconds: settings.eyeBreakIntervalSeconds,
             eyeBreakRestSeconds: settings.eyeBreakRestSeconds,
             nextEyeBreakAt: eyeBreakTimer.nextBreakAt,
-            isEyeBreaking: eyeBreakTimer.isResting
+            isEyeBreaking: eyeBreakTimer.isResting,
+            isAwaitingEyeBreakReturn: eyeBreakTimer.isAwaitingReturn
         )
     }
 

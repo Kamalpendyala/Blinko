@@ -8,17 +8,29 @@ public struct EyeBreakTimerConfig: Equatable {
     public var interval: TimeInterval
     /// How long the "look away" card stays up.
     public var restSeconds: TimeInterval
+    /// Grace period after a rest ends before the focus timer may start again.
+    /// Gives the user time to stand up and leave without arming the next break.
+    public var returnDelay: TimeInterval
+    /// How often the monitor re-checks for the user's return once the grace
+    /// period has passed. Only used while the timer is waiting for presence.
+    public var returnCheckSeconds: TimeInterval
 
     public init(
         enabled: Bool = true,
         interval: TimeInterval = 20 * 60,
-        restSeconds: TimeInterval = 20
+        restSeconds: TimeInterval = 20,
+        returnDelay: TimeInterval = 60,
+        returnCheckSeconds: TimeInterval = 5
     ) {
         precondition(interval > 0, "interval must be positive")
         precondition(restSeconds > 0, "rest duration must be positive")
+        precondition(returnDelay >= 0, "return delay must not be negative")
+        precondition(returnCheckSeconds > 0, "return check must be positive")
         self.enabled = enabled
         self.interval = interval
         self.restSeconds = restSeconds
+        self.returnDelay = returnDelay
+        self.returnCheckSeconds = returnCheckSeconds
     }
 }
 
@@ -27,6 +39,8 @@ public enum EyeBreakDecision: Equatable {
     case none
     case beginRest
     case endRest
+    /// The user came back after a break, so a fresh focus interval started.
+    case resumeFocus
     case suppressed(NudgeSuppression)
 }
 
@@ -34,19 +48,31 @@ public enum EyeBreakDecision: Equatable {
 ///
 /// One break is due every `interval` seconds and lasts `restSeconds`. The timer
 /// owns no timers itself: the monitor arms a single tolerant one-shot timer at
-/// `nextDeadline()` and calls `evaluate` when it wakes. Time is monotonic
+/// `nextDeadline(after:)` and calls `evaluate` when it wakes. Time is monotonic
 /// seconds supplied by the caller, so wall-clock jumps cannot delay or duplicate
 /// a break (same rule as `BlinkGapPolicy`).
+///
+/// After a rest the focus timer does not simply restart: the user may have
+/// walked away. The timer waits out `returnDelay` (so leaving does not arm a
+/// break) and then starts a full fresh interval at the first moment presence is
+/// reported. Time spent away is never credited, so a break can never fire while
+/// the desk is empty.
 public struct EyeBreakTimer {
     public private(set) var config: EyeBreakTimerConfig
-    /// When the next automatic break is due, or nil while resting/disabled.
+    /// When the next automatic break is due, or nil while resting, waiting for
+    /// the user to return, or disabled.
     public private(set) var nextBreakAt: TimeInterval?
     /// When the current rest ends, or nil when not resting.
     public private(set) var restEndsAt: TimeInterval?
+    /// Earliest instant the focus timer may start again after a rest, or nil
+    /// when not waiting for a return.
+    public private(set) var resumeNotBefore: TimeInterval?
     /// Number of breaks started (automatic and manual).
     public private(set) var breakCount = 0
 
     public var isResting: Bool { restEndsAt != nil }
+    /// True from the end of a rest until presence restarts the focus timer.
+    public var isAwaitingReturn: Bool { resumeNotBefore != nil }
 
     public init(config: EyeBreakTimerConfig = EyeBreakTimerConfig()) {
         self.config = config
@@ -56,6 +82,7 @@ public struct EyeBreakTimer {
     /// away, so enabling breaks never nags immediately.
     public mutating func start(at now: TimeInterval) {
         restEndsAt = nil
+        resumeNotBefore = nil
         nextBreakAt = config.enabled ? now + config.interval : nil
     }
 
@@ -63,12 +90,13 @@ public struct EyeBreakTimer {
         guard config.enabled != enabled else { return }
         config.enabled = enabled
         if enabled {
-            if restEndsAt == nil {
+            if restEndsAt == nil, resumeNotBefore == nil {
                 nextBreakAt = now + config.interval
             }
         } else {
             nextBreakAt = nil
             restEndsAt = nil
+            resumeNotBefore = nil
         }
     }
 
@@ -76,7 +104,7 @@ public struct EyeBreakTimer {
     public mutating func setInterval(_ interval: TimeInterval, at now: TimeInterval) {
         guard interval > 0, config.interval != interval else { return }
         config.interval = interval
-        if config.enabled, restEndsAt == nil {
+        if config.enabled, restEndsAt == nil, resumeNotBefore == nil {
             nextBreakAt = now + interval
         }
     }
@@ -101,6 +129,7 @@ public struct EyeBreakTimer {
         }
         restEndsAt = now + config.restSeconds
         nextBreakAt = nil
+        resumeNotBefore = nil
         return .beginRest
     }
 
@@ -109,16 +138,46 @@ public struct EyeBreakTimer {
     /// A break that comes due while suppressed is skipped and rescheduled a
     /// full interval later instead of firing late (no catch-up after sleep,
     /// quiet hours or pause).
+    ///
+    /// `presenceDetected` is the caller's return signal (camera face presence,
+    /// or keyboard/mouse activity as an implicit fallback). It is only consulted
+    /// once a rest has ended and the return grace period has elapsed.
     @discardableResult
     public mutating func evaluate(
         now: TimeInterval,
-        suppression: NudgeSuppression = []
+        suppression: NudgeSuppression = [],
+        presenceDetected: Bool = false
     ) -> EyeBreakDecision {
         if let restEnd = restEndsAt {
             guard now >= restEnd else { return .none }
             restEndsAt = nil
-            nextBreakAt = config.enabled ? now + config.interval : nil
+            nextBreakAt = nil
+            // Measured from the end of the rest, not from a late wake, so a
+            // delayed evaluation never shortens the grace period.
+            resumeNotBefore = restEnd + config.returnDelay
             return .endRest
+        }
+
+        if let resumeAt = resumeNotBefore {
+            guard now >= resumeAt else { return .none }
+            // Being away is exactly what this state is waiting for, so the idle
+            // gate must not cancel the wait. Other suppression (quiet hours,
+            // fullscreen, DND, low battery) keeps the old "skip and reschedule"
+            // rule so the timer does not poll through a long quiet window.
+            let blocking = suppression.subtracting(.userIdle)
+            guard blocking.isEmpty else {
+                resumeNotBefore = nil
+                nextBreakAt = config.enabled ? now + config.interval : nil
+                return .suppressed(blocking)
+            }
+            guard config.enabled else {
+                resumeNotBefore = nil
+                return .none
+            }
+            guard presenceDetected else { return .none }
+            resumeNotBefore = nil
+            nextBreakAt = now + config.interval
+            return .resumeFocus
         }
 
         guard config.enabled else {
@@ -145,8 +204,15 @@ public struct EyeBreakTimer {
     }
 
     /// The next monotonic instant the monitor should wake for, if any.
-    public func nextDeadline() -> TimeInterval? {
+    ///
+    /// While waiting for the user to return this is the end of the grace period
+    /// and then a low-frequency re-check, so the monitor never polls faster than
+    /// `returnCheckSeconds`.
+    public func nextDeadline(after now: TimeInterval) -> TimeInterval? {
         if let restEndsAt { return restEndsAt }
+        if let resumeNotBefore {
+            return max(resumeNotBefore, now + config.returnCheckSeconds)
+        }
         guard config.enabled else { return nil }
         return nextBreakAt
     }
@@ -154,6 +220,7 @@ public struct EyeBreakTimer {
     public mutating func reset() {
         nextBreakAt = nil
         restEndsAt = nil
+        resumeNotBefore = nil
         breakCount = 0
     }
 }

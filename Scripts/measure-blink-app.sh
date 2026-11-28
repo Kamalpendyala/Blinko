@@ -94,7 +94,19 @@ echo "---------  ------  --------------  ----------------"
 elapsed=0
 prev_ts=""
 declare -a prev_pids=() prev_secs=()
-declare -A sec_by_pid=()
+declare -a sec_pids=() sec_vals=()
+
+# macOS ships bash 3.2, which has no associative arrays. The PID count is tiny,
+# so a linear scan keeps the script portable without a bash-4 requirement.
+sec_for_pid() {
+    local target="$1" i
+    for i in "${!sec_pids[@]}"; do
+        if [[ "${sec_pids[$i]}" == "$target" ]]; then
+            printf '%s\n' "${sec_vals[$i]}"
+            return 0
+        fi
+    done
+}
 
 while (( elapsed < duration )); do
     pids="$(collect_pids)"
@@ -120,7 +132,8 @@ while (( elapsed < duration )); do
         print $1, days * 86400 + sec
     }' || true)"
 
-    sec_by_pid=()
+    sec_pids=()
+    sec_vals=()
     declare -a cur_pids=() cur_rss=() cur_life=() cur_comm=() cur_sample=()
     while read -r p r l c; do
         [[ -n "$p" ]] || continue
@@ -134,7 +147,8 @@ while (( elapsed < duration )); do
     # pairing the rows by position would attribute one process's CPU to another.
     while read -r p s; do
         [[ -n "$p" ]] || continue
-        sec_by_pid["$p"]="$s"
+        sec_pids+=("$p")
+        sec_vals+=("$s")
     done <<< "$time_rows"
 
     # Match PIDs between samples (helpers can come and go) and turn CPU-time
@@ -149,7 +163,7 @@ while (( elapsed < duration )); do
         life_total="$(awk -v a="$life_total" -v b="${cur_life[$i]}" 'BEGIN { print a + b }')"
 
         sample_now=0
-        sec="${sec_by_pid[${cur_pids[$i]}]-}"
+        sec="$(sec_for_pid "${cur_pids[$i]}")"
         if [[ -n "$sec" && -n "$prev_ts" ]]; then
             for j in "${!prev_pids[@]}"; do
                 if [[ "${prev_pids[$j]}" == "${cur_pids[$i]}" ]]; then
@@ -183,7 +197,7 @@ while (( elapsed < duration )); do
     prev_pids=("${cur_pids[@]}")
     prev_secs=()
     for i in "${!cur_pids[@]}"; do
-        prev_secs+=("${sec_by_pid[${cur_pids[$i]}]-}")
+        prev_secs+=("$(sec_for_pid "${cur_pids[$i]}")")
     done
 
     sleep "$interval"
@@ -191,7 +205,6 @@ while (( elapsed < duration )); do
 done
 
 awk -F, '
-    NR == 0 { print "No samples collected."; exit }
     {
         n++
         rss_sum += $2; if ($2 > rss_max) rss_max = $2

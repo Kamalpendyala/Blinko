@@ -92,7 +92,7 @@ final class NudgePanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    func update(reason: NudgeReason) {
+    func update(reason: NudgeReason, restSeconds: TimeInterval = 20) {
         switch reason {
         case .noBlink:
             titleLabel.stringValue = "Time to blink"
@@ -105,9 +105,17 @@ final class NudgePanel: NSPanel {
         case .eyeBreak:
             titleLabel.stringValue = "Look away"
             subtitleLabel.stringValue =
-                "20-20-20: focus on something ~20 feet away for 20 seconds."
+                "20-20-20: focus on something ~20 feet away for \(Self.secondsText(restSeconds))."
             apply(accent: .systemTeal)
         }
+    }
+
+    /// Matches the card's lifetime when the rest duration is not the default.
+    private static func secondsText(_ seconds: TimeInterval) -> String {
+        let value = seconds == seconds.rounded()
+            ? String(Int(seconds))
+            : String(format: "%.1f", seconds)
+        return value == "1" ? "1 second" : "\(value) seconds"
     }
 
     /// Centers the card on the screen under the pointer.
